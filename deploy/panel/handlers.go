@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -33,7 +34,7 @@ var indexHTML []byte
 //go:embed web/qrcode.min.js
 var qrcodeJS []byte
 
-const (
+var (
 	binGenConf        = "/usr/local/bin/ansgo-genconf"
 	binAdmin          = "/usr/local/bin/ansgo-admin"
 	binAcme           = "/root/.acme.sh/acme.sh"
@@ -662,6 +663,9 @@ func setSecret(key, value string) error {
 }
 
 func setSecretLocked(key, value string) error {
+	if strings.ContainsAny(value, "\r\n\x00") {
+		return fmt.Errorf("凭证不能包含换行或 NUL")
+	}
 	data, err := os.ReadFile(secretsPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -770,7 +774,7 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 400, "AnyTLS 密码不能为空")
 			return
 		}
-		if err := setSecret("ANYTLS_PASS", strings.TrimSpace(b.Pass)); err != nil {
+		if err := setSecret("ANYTLS_PASS", b.Pass); err != nil {
 			jerr(w, 500, "写入 ANYTLS_PASS 失败: "+err.Error())
 			return
 		}
@@ -924,6 +928,122 @@ func writeAcmeAccountConf(c Config) error {
 	return atomicWrite(acmeAccountConf, []byte(content))
 }
 
+var certIssueLog = "/var/log/ansgo/cert-issue.log"
+
+// 记录日志边界，脚本轮转后从新内容读取；单次响应至多 64KB。
+type certLogStart struct {
+	offset int64
+	anchor string
+}
+
+func certLogBoundary() certLogStart {
+	f, err := os.Open(certIssueLog)
+	if err != nil {
+		return certLogStart{}
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return certLogStart{}
+	}
+	n := min(st.Size(), 64)
+	b := make([]byte, n)
+	_, _ = f.ReadAt(b, st.Size()-n)
+	return certLogStart{st.Size(), string(b)}
+}
+func certLogSince(start certLogStart, fallback []byte) string {
+	f, err := os.Open(certIssueLog)
+	if err != nil {
+		return string(fallback[:min(len(fallback), 64*1024)])
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	b := make([]byte, len(start.anchor))
+	_, _ = f.ReadAt(b, start.offset-int64(len(b)))
+	if st.Size() < start.offset || string(b) != start.anchor {
+		start.offset = 0
+	}
+	offset := max(start.offset, st.Size()-64*1024)
+	_, _ = f.Seek(offset, io.SeekStart)
+	out, _ := io.ReadAll(io.LimitReader(f, 64*1024))
+	if len(out) == 0 {
+		return string(fallback[:min(len(fallback), 64*1024)])
+	}
+	return string(out)
+}
+
+func certRestartResponse(w http.ResponseWriter, c Config, out, msg string) {
+	scheduleSelfRestart(3)
+	jwrite(w, 200, map[string]any{"ok": true, "log": out, "cert": certInfoFull(c),
+		"restart_in": 3, "new_url": fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath), "msg": msg})
+}
+
+func certSnapshots(c Config) ([]fileSnapshot, error) {
+	cert, key := certPaths(c)
+	var saved []fileSnapshot
+	for _, path := range []string{cert, key} {
+		s, err := snapshot(path)
+		if err != nil {
+			return nil, err
+		}
+		saved = append(saved, s)
+	}
+	return saved, nil
+}
+
+func restoreCertSnapshots(saved []fileSnapshot) error {
+	var err error
+	for _, s := range saved {
+		err = errors.Join(err, s.restore())
+	}
+	return err
+}
+
+// manual 的源配置一直生效到签发、密钥对校验及配置应用全部成功。
+func issueAndActivateCert(w http.ResponseWriter, c Config) {
+	if !dynuConfigured(c) {
+		jerr(w, 400, "尚未配置 Dynu 凭证，请填写 API Key 或完整 OAuth 凭证")
+		return
+	}
+	// 先保存凭证，失败重试时仍可使用；保留当前证书模式与路径。
+	current := configGet()
+	current.DynuAPIKey, current.DynuClientID, current.DynuSecret, current.AcmeEmail = c.DynuAPIKey, c.DynuClientID, c.DynuSecret, c.AcmeEmail
+	if err := configSet(current); err != nil {
+		jerr(w, 500, err.Error())
+		return
+	}
+	c.CertMode = "acme"
+	saved, err := certSnapshots(c)
+	if err != nil {
+		jerr(w, 500, "无法备份目标证书: "+err.Error())
+		return
+	}
+	out, err := runCertIssue(c)
+	cert, key := certPaths(c)
+	if err == nil {
+		_, err = tls.LoadX509KeyPair(cert, key)
+	}
+	if err == nil {
+		err = applyConfigTransaction(c, func() error { return nil }, func() error {
+			if err := reloadProxyServices(); err != nil {
+				// Docker manual 与 ACME 共用固定路径，恢复旧配置前先恢复旧证书。
+				return errors.Join(err, restoreCertSnapshots(saved))
+			}
+			return nil
+		},
+			[]string{"/etc/sing-box/config.json", "/etc/caddy/Caddyfile"})
+	}
+	if err != nil {
+		err = errors.Join(err, restoreCertSnapshots(saved))
+		jwrite(w, 500, map[string]any{"ok": false, "log": out, "error": err.Error(), "msg": "签发或应用失败，证书模式未切换"})
+		return
+	}
+	certRestartResponse(w, c, out, "证书已签发并切换到 ACME，面板将在 3 秒后重启。")
+}
+
 // runCertIssue 调用 ansgo-cert-issue.sh 签发证书（同步阻塞，约 1-3 分钟）。
 // 凭证从 Config 注入环境变量（与 install.sh 同语义），不再依赖调用方传环境。
 // 返回 (日志, 错误)。
@@ -931,6 +1051,7 @@ func runCertIssue(c Config) (string, error) {
 	// 先把凭证写进 account.conf，保证续期 cron 可用（issue 流程也会通过环境读到）。
 	_ = writeAcmeAccountConf(c)
 
+	start := certLogBoundary()
 	cmd := command("bash", binCertIssue)
 	cmd.Env = append(os.Environ(),
 		"DOMAIN="+c.Domain,
@@ -938,9 +1059,11 @@ func runCertIssue(c Config) (string, error) {
 		"DYNU_API_KEY="+c.DynuAPIKey,
 		"DYNU_CLIENT_ID="+c.DynuClientID,
 		"DYNU_SECRET="+c.DynuSecret,
+		"ANSGO_SKIP_PANEL_RESTART=1",
+		"ANSGO_SKIP_PROXY_RESTART=1",
 	)
 	out, err := cmd.CombinedOutput()
-	return string(out), err
+	return certLogSince(start, out), err
 }
 
 func certHandler(w http.ResponseWriter, r *http.Request) {
@@ -962,16 +1085,33 @@ func certRenewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// v1.5.27：续期前确保 account.conf 含最新凭证（manual→acme 切换后续期也能读到）。
 	_ = writeAcmeAccountConf(c)
-	renew := command(binAcme, "--renew", "-d", c.Domain, "--ecc", "--force")
-	out, err := renew.CombinedOutput()
-	if err == nil {
-		err = reloadProxyServices()
-	}
+	saved, err := certSnapshots(c)
 	if err != nil {
-		jwrite(w, 500, map[string]any{"ok": false, "log": string(out), "error": err.Error()})
+		jerr(w, 500, "无法备份当前证书: "+err.Error())
 		return
 	}
-	jwrite(w, 200, map[string]any{"ok": true, "log": string(out), "cert": certInfoFull(c)})
+	start := certLogBoundary()
+	renew := command(binAcme, "--renew", "-d", c.Domain, "--ecc", "--force")
+	renew.Env = append(os.Environ(), "ANSGO_SKIP_PANEL_RESTART=1", "ANSGO_SKIP_PROXY_RESTART=1")
+	out, err := renew.CombinedOutput()
+	if err == nil {
+		cert, key := certPaths(c)
+		_, err = tls.LoadX509KeyPair(cert, key)
+	}
+	applied := err == nil
+	if applied {
+		err = reloadProxyServices()
+	}
+	logOut := certLogSince(start, out)
+	if err != nil {
+		err = errors.Join(err, restoreCertSnapshots(saved))
+		if applied {
+			err = errors.Join(err, reloadProxyServices())
+		}
+		jwrite(w, 500, map[string]any{"ok": false, "log": logOut, "error": err.Error()})
+		return
+	}
+	certRestartResponse(w, c, logOut, "证书已续期，面板将在 3 秒后重启。")
 }
 
 // certReloadHandler 手动证书模式下，用户在服务器替换证书文件后点此触发三服务重新读取。
@@ -1129,6 +1269,10 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if b.AcmeEmail != nil {
 		c.AcmeEmail = strings.TrimSpace(*b.AcmeEmail)
 	}
+	if original.CertMode == "manual" && c.CertMode == "acme" {
+		issueAndActivateCert(w, c)
+		return
+	}
 	// manual 模式必须两路径齐全。Docker 部署下用户填写的是宿主源路径，容器服务仍使用 /etc/ssl/ansgo/ 副本；
 	// 因此不在容器内直接读取宿主源路径，而是由同步脚本/计划任务导入固定挂载目录。
 	if c.CertMode == "manual" {
@@ -1212,25 +1356,24 @@ func certIssueHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := configGet()
-	if c.CertMode != "acme" {
-		jerr(w, 400, "当前不是 acme 自动签发模式，请先在「证书来源」切到 acme 并保存。")
+	// 兼容空请求；manual 模式可直接提交凭证并签发，无需先改用尚不存在的证书。
+	var body struct {
+		DynuAPIKey   *string `json:"dynu_api_key"`
+		DynuClientID *string `json:"dynu_client_id"`
+		DynuSecret   *string `json:"dynu_secret"`
+		AcmeEmail    *string `json:"acme_email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		jerr(w, 400, "请求格式错误")
 		return
 	}
-	if !dynuConfigured(c) {
-		jerr(w, 400, "尚未配置 Dynu 凭证。请先填写 API Key（路径A）或 Client ID+Secret（路径B）并保存，再点签发。")
-		return
+	for dest, value := range map[*string]*string{&c.DynuAPIKey: body.DynuAPIKey, &c.DynuClientID: body.DynuClientID,
+		&c.DynuSecret: body.DynuSecret, &c.AcmeEmail: body.AcmeEmail} {
+		if value != nil {
+			*dest = strings.TrimSpace(*value)
+		}
 	}
-	out, err := runCertIssue(c)
-	if err != nil {
-		jwrite(w, 500, map[string]any{"ok": false, "log": out,
-			"msg": "签发失败，请检查凭证与域名 DNS 是否正确指向本机。"})
-		return
-	}
-	jwrite(w, 200, map[string]any{
-		"ok": true, "log": out,
-		"cert": certInfoFull(c),
-		"msg":  "证书已签发并安装。如需让面板立即用新证书，请点「🔄 手动续期」或稍候自动 reload。",
-	})
+	issueAndActivateCert(w, c)
 }
 
 // ===================== 面板设置 =====================
@@ -2222,6 +2365,14 @@ type secretData struct {
 	SSMethod, SSKey, AnyTLSPass, AnyTLSUUID, SocksUser, SocksPass, NaiveUser, NaivePass string
 }
 
+// secrets.env 是字面 KEY=value；仅兼容历史成对包裹的引号，不做 shell 展开。
+func secretValue(v string) string {
+	if len(v) >= 2 && v[0] == v[len(v)-1] && (v[0] == '\'' || v[0] == '"') {
+		return v[1 : len(v)-1]
+	}
+	return v
+}
+
 func readSecrets() secretData {
 	var s secretData
 	data, err := os.ReadFile(secretsPath)
@@ -2229,8 +2380,8 @@ func readSecrets() secretData {
 		return s
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		line = strings.TrimSuffix(line, "\r")
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue
 		}
 		kv := strings.SplitN(line, "=", 2)
@@ -2238,7 +2389,7 @@ func readSecrets() secretData {
 			continue
 		}
 		k := strings.TrimSpace(kv[0])
-		v := strings.Trim(strings.TrimSpace(kv[1]), `"`)
+		v := secretValue(kv[1])
 		switch k {
 		case "SS_METHOD":
 			s.SSMethod = v
@@ -2276,13 +2427,13 @@ func readLandingSecrets(id string) (pass, uuid string, found bool) {
 	wantUUID := "LANDING_" + id + "_UUID"
 	gotPass, gotUUID := false, false
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+		line = strings.TrimSuffix(line, "\r")
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") || !strings.Contains(line, "=") {
 			continue
 		}
 		kv := strings.SplitN(line, "=", 2)
 		k := strings.TrimSpace(kv[0])
-		v := strings.Trim(strings.TrimSpace(kv[1]), `"`)
+		v := secretValue(kv[1])
 		switch k {
 		case wantPass:
 			pass = v

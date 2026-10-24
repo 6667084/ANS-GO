@@ -4,7 +4,7 @@
 #
 # 面板全挂也能用 SSH 管理一切。配置源头：
 #   /etc/ansgo/panel.json   端口+面板设置+域名 (JSON)
-#   /etc/ansgo/secrets.env      SS_KEY/ANYTLS_*/SOCKS_*/NAIVE_* (shell 可 source)
+#   /etc/ansgo/secrets.env      SS_KEY/ANYTLS_*/SOCKS_*/NAIVE_* (原始 KEY=value，仅去掉成对外层引号)
 #
 # 用法见末尾 usage() 或 README。
 # =============================================================================
@@ -51,8 +51,11 @@ import sys
 p,key=sys.argv[1:]
 try:
     for line in open(p):
-        if line.startswith(key+'='):
-            print(line.rstrip('\n').split('=',1)[1]); break
+        if '=' not in line or line.lstrip().startswith('#'): continue
+        k, v = line.rstrip('\r\n').split('=', 1)
+        if k.strip() == key:
+            value = v[1:-1] if len(v)>=2 and v[0]==v[-1] and v[0] in ("'", '"') else v
+    print(value if 'value' in locals() else '')
 except OSError: pass
 PYSEC
 }
@@ -133,10 +136,11 @@ groups = {}
 for path, category, stamp in paths:
     groups.setdefault(category, []).append((path, stamp))
 remaining = []
-for items in groups.values():
+for category, items in groups.items():
+    limit = min(keep, 2) if category in ('upgrade', 'ansgo-backup-upgrade', 'ansgo-etc-vol-backup') else keep
     items.sort(key=lambda x: (x[1], os.stat(x[0]).st_mtime_ns), reverse=True)
-    for path, stamp in items[keep:]: remove(path)
-    remaining.extend(items[:keep])
+    for path, stamp in items[limit:]: remove(path)
+    remaining.extend(items[:limit])
 remaining.sort(key=lambda x: (x[1], os.stat(x[0]).st_mtime_ns))
 total = sum(size(p) for p, _ in remaining)
 for path, _ in remaining:
@@ -178,8 +182,8 @@ _setsecret(){
   python3 - "$SECRETS" "$1" "$2" <<'PYSECRET'
 import os, re, sys, tempfile
 p, k, v = sys.argv[1:]
-if not re.fullmatch(r'[A-Z][A-Z0-9_]*', k) or any(c in v for c in "'\n\r$`\\\";|&()<>\t "):
-    sys.exit('凭证包含不安全 shell 字符，请使用字母数字及常规符号')
+if not re.fullmatch(r'[A-Z][A-Z0-9_]*', k) or any(c in v for c in "\n\r\0"):
+    sys.exit('凭证不能包含换行或 NUL')
 lines = open(p).read().splitlines() if os.path.exists(p) else []
 lines = [line for line in lines if not line.startswith(k+'=')]+[k+'='+v]
 fd, tmp = tempfile.mkstemp(prefix='.ansgo-secret-', dir=os.path.dirname(p))
@@ -230,9 +234,10 @@ try:
     cfg=json.load(open(CONF))
     secs={}
     for line in open(SECRETS):
-        line=line.strip()
+        line=line.rstrip('\r\n')
         if line and not line.startswith("#") and "=" in line:
-            k,_,v=line.partition("="); secs[k.strip()]=v.strip().strip('"')
+            k,_,v=line.partition("=")
+            secs[k.strip()]=v[1:-1] if len(v)>=2 and v[0]==v[-1] and v[0] in ("'", '"') else v
     for L in cfg.get("landings",[]):
         if str(L.get("enabled","false")).lower() not in ("true","1"): continue
         lid=str(L.get("id",""))

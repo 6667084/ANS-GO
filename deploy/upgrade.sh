@@ -26,6 +26,10 @@ usage(){ cat <<'EOF'
   --metal 更新全部受管组件、按活跃服务重启并验证；失败自动恢复整套备份
   --docker 拉取明确版本镜像、迁移旧落地配置、备份实际卷并重建验证
 日志: /var/log/ansgo/upgrade.log  结果: /var/lib/ansgo/upgrade.result
+下载源环境变量（每次执行读取，不写入已安装脚本）：
+  ANSGO_RAW_BASE      deploy 目录 URL
+  ANSGO_REL_BASE      release 下载根，按 <base>/<ver>/<asset> 取文件
+  ANSGO_RELEASE_API   release 元数据根，按 <api>/<ver> 取 JSON；--auto 另需 <api>/latest
 EOF
 }
 while [ $# -gt 0 ]; do
@@ -69,7 +73,18 @@ else
   exec > >(tee -a "$LOG") 2>&1
 fi
 say(){ trim_log; printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
-write_result(){ printf '%s\n' "$1" > "$RESULT.tmp"; mv "$RESULT.tmp" "$RESULT"; }
+TASK_STARTED=$(date +%s)
+TASK_ID="${ANSGO_UPGRADE_TASK_ID:-${INVOCATION_ID:-cli-$TASK_STARTED-$$}}"
+write_result(){
+  python3 - "$RESULT" "$1" "$TASK_ID" "$TASK_STARTED" <<'PYRESULT'
+import json, os, sys, time
+p, result, task_id, started = sys.argv[1:]
+with open(p+'.tmp', 'w') as f:
+    json.dump(dict(result=result, task_id=task_id, started_at=int(started), finished_at=int(time.time())), f)
+os.chmod(p+'.tmp', 0o600)
+os.replace(p+'.tmp', p)
+PYRESULT
+}
 finish(){
   local rc=$?
   trap - EXIT INT TERM
@@ -152,8 +167,10 @@ PY
   fi
 }
 if [ "$AUTO" = 1 ]; then
+  LATEST_API="https://api.github.com/repos/$REPO/releases/latest"
+  [ -z "${ANSGO_RELEASE_API:-}" ] || LATEST_API="${ANSGO_RELEASE_API%/}/latest"
   VER=$(curl --noproxy '*' --connect-timeout 5 --max-time 10 -fsSL \
-    "https://api.github.com/repos/$REPO/releases/latest" |
+    "$LATEST_API" |
     python3 -c 'import json,re,sys; d=json.load(sys.stdin); v=d["tag_name"]; assert not d.get("prerelease") and not d.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+",v); print(v)')
   CURRENT=$(current_version)
   if ! python3 - "$CURRENT" "$VER" <<'PY'
@@ -167,8 +184,12 @@ PY
     exit 0
   fi
 fi
-RAW="https://raw.githubusercontent.com/$REPO/$VER/deploy"
-REL="https://github.com/$REPO/releases/download/$VER"
+RAW="${ANSGO_RAW_BASE:-https://raw.githubusercontent.com/$REPO/$VER/deploy}"
+RAW="${RAW%/}"
+REL="${ANSGO_REL_BASE:-https://github.com/$REPO/releases/download}"
+REL="${REL%/}/$VER"
+RELEASE_API="${ANSGO_RELEASE_API:-https://api.github.com/repos/$REPO/releases/tags}"
+RELEASE_API="${RELEASE_API%/}"
 if [ "$YES" = 0 ]; then
   printf '将升级到 %s（%s），升级前自动备份。继续？[y/N] ' "$VER" "$MODE"
   read -r answer </dev/tty
@@ -248,7 +269,7 @@ upgrade_metal(){
   bash -n "$STAGE/ansgo-upgrade"
   for f in "${units[@]}"; do dl "$RAW/$f" "$STAGE/${f##*/}"; done
   # 发布清单存在时必须校验；API 中有清单但下载失败不能降级跳过。
-  dl "https://api.github.com/repos/$REPO/releases/tags/$VER" "$STAGE/release.json"
+  dl "$RELEASE_API/$VER" "$STAGE/release.json"
   checksum_name=$(python3 - "$STAGE/release.json" <<'PY'
 import json,sys
 names={a['name'] for a in json.load(open(sys.argv[1]))['assets']}

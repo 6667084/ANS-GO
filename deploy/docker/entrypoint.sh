@@ -35,11 +35,22 @@ source /usr/local/bin/ansgo-limits || exit 1
 ansgo_logs_init || exit 1
 ansgo_limits || exit 1
 log(){ ansgo_log_trim /var/log/ansgo/entrypoint.log; echo "[entrypoint] $*" | tee -a /var/log/ansgo/entrypoint.log; }
-# 直接传 env 的用户也必须经过同样的 shell 安全边界。
+# 编码仅用于穿过 compose dotenv；secrets.env 内始终保存字面值。
 for field in SS_KEY_IN ANYTLS_PASS_IN ANYTLS_UUID_IN SOCKS_USER_IN SOCKS_PASS_IN NAIVE_USER_IN NAIVE_PASS_IN; do
+  encoded="${field}_ENCODED"
+  if [ -n "${!encoded:-}" ]; then
+    value=$(python3 - "${!encoded}" <<'PYSECRET'
+import sys, urllib.parse
+value = urllib.parse.unquote(sys.argv[1])
+if any(c in value for c in '\n\r\0'): sys.exit('凭证不能包含换行或 NUL')
+print(value, end='')
+PYSECRET
+) || exit 1
+    printf -v "$field" '%s' "$value"
+  fi
   value="${!field:-}"
-  if [ -n "$value" ] && [[ "$value" =~ [^a-zA-Z0-9_./+=,@%:!?~-] ]]; then
-    log "FATAL: $field 含不安全 shell 字符"; exit 1
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    log "FATAL: $field 不能包含换行"; exit 1
   fi
 done
 

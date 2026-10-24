@@ -137,6 +137,26 @@ await test('落地草稿的离页确认与 beforeunload；取消离页保持原�
   await b.ctx.showTab('node'); assert.equal(b.get('state.tab'), 'landing');
   const event = new DOMEvent('beforeunload'); b.events.get('beforeunload')(event); assert.equal(event.defaultPrevented, true);
 });
+await test('仪表盘健康检测为次级按钮；内容焦点无青色边框，页面不透明度渐入', async () => {
+  const b = await boot(); await b.tab('dash');
+  const buttons = b.document.querySelector('[data-fold="dash.services"]').querySelectorAll('button').filter(n => n.textContent === '健康检测');
+  assert.equal(buttons.length, 4); assert.ok(buttons.every(n => n.classList.contains('secondary')));
+  assert.match(html, /\.content:focus-visible\{outline:none\}/);
+  assert.doesNotMatch(html, /animation:appear|@keyframes appear/);
+});
+await test('manual 填凭证后直接签发切换，失败日志可见且按钮恢复', async () => {
+  const b = await boot({ certMode: 'manual', dynu: 'none' }); await b.tab('cert');
+  const e = b.get('state.cert'), action = findButton(e.form.root, '签发并切换到 ACME');
+  assert.equal(e.apiKey.wrap.parentNode.parentNode.hidden, false);
+  input(e.apiKey.input, 'example-key'); input(e.email.input, 'admin@your-domain.com');
+  b.ctx.intercept = (key, method) => key === 'cert/issue' && method === 'POST' ? { status: 500, body: { ok: false, error: '签发失败', log: '本次 DNS 校验失败' } } : null;
+  await click(action);
+  assert.equal(e.mode.input.value, 'manual'); assert.equal(e.log.hidden, false); assert.equal(e.log.textContent, '本次 DNS 校验失败'); assert.equal(e.actions.root.open, true); assert.equal(action.disabled, false);
+  assert.equal(b.posts.at(-1).body.dynu_api_key, 'example-key');
+  assert.equal(b.posts.at(-1).key, 'cert/issue'); assert.ok(!b.posts.some(p => p.key === 'cert/config'));
+  b.ctx.intercept = (key, method) => key === 'cert/issue' && method === 'POST' ? { status: 200, body: { ok: true, log: '本次签发成功', restart_in: 3, new_url: 'https://your-domain.com/admin/' } } : null;
+  await click(action); assert.equal(e.log.textContent, '本次签发成功'); assert.equal(b.document.querySelector('#overlay').hidden, false);
+});
 await test('证书脚本仅 Docker+manual 显示；未保存来源隐藏所有旧模式操作', async () => {
   for (const docker of [false, true]) for (const mode of ['acme', 'manual']) {
     const b = await boot({ docker, certMode: mode }); await b.tab('cert'); const sync = b.document.querySelector('#docker_sync_wrap'), entry = b.get('state.cert');

@@ -86,8 +86,12 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 }
 
 REPO="6667084/ANS-GO"
-RAW="https://raw.githubusercontent.com/${REPO}/v1.6.0/deploy"
-REL="https://github.com/${REPO}/releases/download"
+RAW="${ANSGO_RAW_BASE:-https://raw.githubusercontent.com/${REPO}/v1.6.0/deploy}"
+RAW="${RAW%/}"
+REL="${ANSGO_REL_BASE:-https://github.com/${REPO}/releases/download}"
+REL="${REL%/}"
+RELEASE_API="${ANSGO_RELEASE_API:-https://api.github.com/repos/${REPO}/releases/tags}"
+RELEASE_API="${RELEASE_API%/}"
 VER="v1.6.0"         # 面板二进制 release tag（install.sh 脚本本体 v1.6.0：--panel-title/--server-ip 安装参数 + ACME 引导精简）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
@@ -129,8 +133,8 @@ hr(){ printf "\n${C_B}═══ %s ═══${C_0}\n" "$*"; }
 # 之前定义在 line 654（在 do_docker_deploy 的 line 472 调用之后才解析），
 # 导致 bash 单遍解析时 do_docker_deploy 内调用 dl_or_exit 报 command not found
 dl(){ # URL DEST
-  if command -v curl >/dev/null; then curl -fsSL "$1" -o "$2"
-  else wget -qO "$2" "$1"; fi
+  if command -v curl >/dev/null; then curl --connect-timeout 10 --max-time 180 -fsSL "$1" -o "$2"
+  else wget --timeout=30 --tries=2 -qO "$2" "$1"; fi
 }
 dl_or_exit(){ dl "$1" "$2" || { err "下载失败: $1"; exit 3; }; }
 
@@ -177,6 +181,10 @@ usage(){ cat <<EOF
   --purge                  与 --uninstall 同用：彻底删除配置/密钥/证书/卷/镜像
   -h, --help
 交互式运行（无参数）会显示主菜单：安装 / 卸载 / 彻底卸载 / 落地
+下载源环境变量（仅本次执行生效）：
+  ANSGO_RAW_BASE      deploy 目录 URL
+  ANSGO_REL_BASE      release 下载根，按 <base>/<ver>/<asset> 取文件
+  ANSGO_RELEASE_API   release 元数据根，按 <api>/<ver> 取 JSON
 EOF
 }
 
@@ -320,6 +328,47 @@ with open(p, 'rb') as f:
 PY
 }
 
+# 全部预检只访问远端和临时目录，失败前不安装依赖或写入宿主配置。
+ansgo_asset_probe(){
+  if command -v curl >/dev/null; then
+    curl --connect-timeout 5 --max-time 15 -fsSLI "$1" >/dev/null 2>&1 ||
+      curl --connect-timeout 5 --max-time 15 -fsSL --range 0-0 --max-filesize 1048576 "$1" -o /dev/null
+  elif command -v wget >/dev/null; then
+    wget --timeout=15 --tries=1 --spider -q "$1"
+  else
+    err "预检需要已有 curl 或 wget，请先安装下载工具"; return 1
+  fi
+}
+ansgo_preflight_assets(){
+  local f meta="$WORK/release.json"
+  dl "$RELEASE_API/$VER" "$meta" || { err "发布元数据不可下载"; return 1; }
+  # 已有 python 时验证发布清单；缺少时仍逐 URL 检查，不为预检安装软件。
+  if command -v python3 >/dev/null; then
+    python3 - "$meta" "ansgo-panel-linux-$AARCH" <<'PYPREFLIGHT'
+import json, sys
+names = {a['name'] for a in json.load(open(sys.argv[1]))['assets']}
+assert sys.argv[2] in names, 'release 缺少当前架构的面板资产'
+PYPREFLIGHT
+    [ "$?" = 0 ] || return 1
+  fi
+  ansgo_asset_probe "$REL/$VER/ansgo-panel-linux-$AARCH" || return 1
+  for f in ansgo-limits ansgo-admin ansgo-genconf ansgo-cert-reload ansgo-cert-issue.sh ansgo-sync-manual-cert ansgo-landing.sh dns_dynukey.sh upgrade.sh ansgo-panel.service systemd/caddy.service systemd/sing-box.service systemd/ansgo-autoupgrade.service systemd/ansgo-autoupgrade.timer; do
+    ansgo_asset_probe "$RAW/$f" || { err "必需脚本不可下载: $f"; return 1; }
+  done
+  if [ "$DOCKER" = 1 ]; then
+    ansgo_asset_probe "$RAW/docker-compose.yml" || return 1
+  else
+    if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -Fq 'http.handlers.forward_proxy'; then
+      ansgo_asset_probe "$REL/$VER/caddy-naive-linux-$AARCH" ||
+        ansgo_asset_probe "$REL/v1.5.16/caddy-naive-linux-$AARCH" || return 1
+    fi
+    if [ "$FORCE_BIN" = 1 ] || ! command -v sing-box >/dev/null; then
+      ansgo_asset_probe "$REL/$VER/sing-box-linux-$AARCH.tar.gz" ||
+        ansgo_asset_probe "https://github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-linux-$AARCH.tar.gz" || return 1
+    fi
+  fi
+}
+
 # =============================================================================
 # 参数校验（v1.5.5 新增）
 #   仅对「带参数安装/部署」场景校验；--uninstall / --landing / --purge 跳过
@@ -328,12 +377,12 @@ validate_inputs(){
   local errs=0 port p
   local final="${VALIDATE_PORTS_ONLY:-0}"
 
-  # secrets.env 保持 source 兼容；拒绝 shell 元字符，而非尝试多种解析器的引用差异。
+  # secrets.env 按字面值解析，仅拒绝不能表示为单行的输入。
   local field value
   for field in SS_PASSWORD ANYTLS_PASSWORD ANYTLS_UUID_IN SOCKS_USER_IN SOCKS_PASSWORD NAIVE_USER_IN NAIVE_PASSWORD; do
     value="${!field:-}"
-    if [[ "$value" =~ [^a-zA-Z0-9_./+=,@%:!?~-] ]] && [ -n "$value" ]; then
-      err "$field 含不安全 shell 字符（引号、空白、美元符号、反引号等）"; errs=$((errs+1))
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+      err "$field 不能包含换行"; errs=$((errs+1))
     fi
   done
   for field in DOMAIN EMAIL PANEL_USER DISGUISE_PANEL DISGUISE_NAIVE DYNU_KEY DYNU_CID DYNU_SECRET CERT_FILE KEY_FILE PANEL_PASSWORD_IN; do
@@ -609,13 +658,13 @@ DYNU_SECRET=${DYNU_SECRET}
 CERT_MODE=${CERT_MODE}
 CERT_FULLCHAIN=${CERT_FILE}
 CERT_PRIVKEY=${KEY_FILE}
-SS_KEY_IN=${SS_PASSWORD}
-ANYTLS_PASS_IN=${ANYTLS_PASSWORD}
-ANYTLS_UUID_IN=${ANYTLS_UUID_IN}
-SOCKS_USER_IN=${SOCKS_USER_IN}
-SOCKS_PASS_IN=${SOCKS_PASSWORD}
-NAIVE_USER_IN=${NAIVE_USER_IN}
-NAIVE_PASS_IN=${NAIVE_PASSWORD}
+SS_KEY_IN_ENCODED=$(ansgo_pct_encode "${SS_PASSWORD}")
+ANYTLS_PASS_IN_ENCODED=$(ansgo_pct_encode "${ANYTLS_PASSWORD}")
+ANYTLS_UUID_IN_ENCODED=$(ansgo_pct_encode "${ANYTLS_UUID_IN}")
+SOCKS_USER_IN_ENCODED=$(ansgo_pct_encode "${SOCKS_USER_IN}")
+SOCKS_PASS_IN_ENCODED=$(ansgo_pct_encode "${SOCKS_PASSWORD}")
+NAIVE_USER_IN_ENCODED=$(ansgo_pct_encode "${NAIVE_USER_IN}")
+NAIVE_PASS_IN_ENCODED=$(ansgo_pct_encode "${NAIVE_PASSWORD}")
 PANEL_TITLE_ENCODED=${_title_enc}
 SERVER_IP_IN=${SERVER_IP_IN}
 NO_CADDY=${NO_CADDY}
@@ -942,23 +991,23 @@ do_docker_deploy(){
   cat <<EOF
 
 ╔═══════════════════════════════════════════════════════════════╗
-║  ✅ ANS-GO 一体化部署完成（Docker / KVM）                     ║
+║  ✅ ANS-GO 一体化部署完成（Docker / KVM）
 ╠═══════════════════════════════════════════════════════════════╣
-║                                                               ║
-║  ⚠️  本次部署端口均为随机生成，请立即记录！                   ║
-║  ─────────────────────────────────────────────────            ║
-║                                                               ║
+║
+║  ⚠️  本次部署端口均为随机生成，请立即记录！
+║  ─────────────────────────────────────────────────
+║
 ║  Web 面板:   https://${DOMAIN}:${PANEL_PORT}${ACTUAL_PATH}
 ║  用户名:     ${PANEL_USER}
 ║  密码(首次): ${PANEL_PW}
-║                                                               ║
-║  ──────── 代理服务端口（登录面板后启用） ────────             ║
+║
+║  ──────── 代理服务端口（登录面板后启用） ────────
 ║   • Shadowsocks : ${SS_PORT}
 ║   • AnyTLS      : ${ANYTLS_PORT}
 ║   • SOCKS5      : ${SOCKS_PORT}
 ║   • NaiveProxy  : ${NAIVE_PORT}
 ║   • 管理面板    : ${PANEL_PORT}
-║                                                               ║
+║
 ╠═══════════════════════════════════════════════════════════════╣
 ║  ⚠️ 证书: $([ "$CERT_MODE" = "manual" ] && echo "手动模式（${CERT_FILE}），无需后台签发" || echo "Let's Encrypt 签发成功")
 ║  管理命令:
@@ -1075,7 +1124,10 @@ if [ "$NONINT" = 0 ]; then
   [ "${c:-Y}" = "Y" ] || [ "${c:-Y}" = "y" ] || { warn "已取消"; exit 0; }
 fi
 
-# 输入收集、校验和确认均已完成，才允许安装依赖及修改宿主。
+WORK=$(mktemp -d) || exit 1
+ansgo_preflight_assets || { err "必需远端资产预检失败，未修改宿主，请检查下载源和版本"; exit 3; }
+
+# 输入收集、资产预检和确认均已完成，才允许安装依赖及修改宿主。
 APT_READY=1
 if ! command -v curl >/dev/null || ! command -v python3 >/dev/null || ! command -v openssl >/dev/null ||
    ! command -v ss >/dev/null || ! command -v crontab >/dev/null; then
@@ -1094,7 +1146,6 @@ if [ "$CERT_MODE" = manual ]; then
   kmod=$(openssl pkey -in "$KEY_FILE" -pubout | openssl sha256) || exit 1
   [ "$cmod" = "$kmod" ] || { err "证书与私钥不匹配"; exit 1; }
 fi
-WORK=$(mktemp -d) || exit 1
 mkdir -p /usr/local/bin
 BIN_STAGE=$(mktemp -d /usr/local/bin/.ansgo-install.XXXXXX) || exit 1
 dl_or_exit "$RAW/ansgo-limits" "$BIN_STAGE/ansgo-limits"
@@ -1318,27 +1369,26 @@ URL_PATH=$(python3 -c "import json;print(json.load(open('/etc/ansgo/panel.json')
 cat <<EOF
 
 ╔═══════════════════════════════════════════════════════════════╗
-║  ✅ ANS-GO 管理面板部署完成                                   ║
+║  ✅ ANS-GO 管理面板部署完成
 ╠═══════════════════════════════════════════════════════════════╣
-║                                                               ║
-║  ⚠️  本次部署端口均为随机生成，请立即记录！                   ║
-║  ─────────────────────────────────────────────────            ║
-║                                                               ║
+║
+║  ⚠️  本次部署端口均为随机生成，请立即记录！
+║  ─────────────────────────────────────────────────
+║
 ║  Web 面板:   https://${DOMAIN}:${PANEL_PORT}${URL_PATH:-/}
 ║  用户名:     ${PANEL_USER}
 ║  密码(仅此一次): ${PANEL_PW}
-║                                                               ║
-║  ──────── 代理服务端口（登录面板后启用） ────────             ║
+║
+║  ──────── 代理服务端口（登录面板后启用） ────────
 ║   • Shadowsocks : ${SS_PORT}
 ║   • AnyTLS      : ${ANYTLS_PORT}
 ║   • SOCKS5      : ${SOCKS_PORT}
 ║   • NaiveProxy  : ${NAIVE_PORT}
 ║   • 管理面板    : ${PANEL_PORT}
-║                                                               ║
+║
 ╠═══════════════════════════════════════════════════════════════╣
-║  下一步：登录面板 →「服务管理」页，按需安装代理服务           ║
-║           落地服务（AnyTLS-2 + 远端 SS）在        ║
-║           「落地服务」页（原「第二组服务」+「出口落地」合并）  ║
+║  下一步：登录面板 →「服务管理」页，按需安装代理服务
+║  落地服务：每个落地独立 AnyTLS 入站，可选 SS / SOCKS5 远端出口
 ╚═══════════════════════════════════════════════════════════════╝
 EOF
 log "代理服务未启动，请在面板「服务管理」页按需开启。"

@@ -89,6 +89,20 @@ def main():
                        remote_password="example-pass", remote_port=1080)
         assert generate(legacy)["outbounds"][-1]["type"] == "socks"
 
+        # 密钥读取全程字面化，主入站与落地入站必须得到同一密码。
+        original_secrets = secrets.read_text()
+        cfg = copy.deepcopy(base)
+        cfg.update(svc_anytls_enabled="true", anytls_port=23458)
+        for value in ["two words", "a$b", "O'Reilly", r"abc\def", " padded "]:
+            for wrapped in [value, "'"+value+"'", '"'+value+'"']:
+                secrets.write_text(original_secrets.replace("ANYTLS_PASS=example-pass", "ANYTLS_PASS="+wrapped)
+                                   .replace("LANDING_1_PASS=example-pass", "LANDING_1_PASS="+wrapped))
+                inbounds = generate(cfg)["inbounds"]
+                anytls = [x for x in inbounds if x["type"] == "anytls"]
+                assert len(anytls) == 2 and all(x["users"][0]["password"] == value for x in anytls)
+        secrets.write_text(original_secrets)
+        print("PASS secrets: genconf 主/落地密码的空格、美元符号、单引号、反斜杠及包裹引号")
+
         # 模拟目标二进制，校验时正式文件应仍为旧版本，临时文件已是 0600。
         binary_dir = root / "usr/local/bin"
         binary_dir.mkdir(parents=True)

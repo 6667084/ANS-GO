@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -168,42 +167,88 @@ func systemCheckUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	jwrite(w, 200, map[string]any{"ok": true, "current": version, "latest": release.Tag, "has_update": newerVersion(release.Tag, version), "url": release.URL})
 }
 
-// 从 systemd 查询任务，面板升级重启后仍能获取状态；只保留最近一次任务。
+var upgradeLockPath = "/var/lib/ansgo/upgrade.lock"
+var upgradeResultPath = "/var/lib/ansgo/upgrade.result"
+
+type upgradeResult struct {
+	Result     string `json:"result"`
+	TaskID     string `json:"task_id"`
+	StartedAt  int64  `json:"started_at"`
+	FinishedAt int64  `json:"finished_at"`
+}
+
+// CLI、timer 和面板共用 flock；服务刚进入 activating、尚未获取锁时也视为运行中。
 func upgradeState() (unit string, running bool, result string, err error) {
-	out, err := command("systemctl", "list-units", "--all", "--plain", "--no-legend", "ansgo-upgrade-*.service").Output()
+	if f, openErr := os.Open(upgradeLockPath); openErr == nil {
+		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if lockErr == nil {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		}
+		f.Close()
+		if lockErr != nil {
+			if lockErr == syscall.EWOULDBLOCK || lockErr == syscall.EAGAIN {
+				running = true
+			} else {
+				return "", false, "", lockErr
+			}
+		}
+	} else if !os.IsNotExist(openErr) {
+		return "", false, "", openErr
+	}
+	out, err := command("systemctl", "list-units", "--all", "--plain", "--no-legend", "ansgo-upgrade-*.service", "ansgo-autoupgrade.service").Output()
 	if err != nil {
-		return "", false, "", err
+		return "", running, "", err
 	}
-	var units []string
+	var record upgradeResult
+	data, _ := os.ReadFile(upgradeResultPath)
+	valid := json.Unmarshal(data, &record) == nil && record.TaskID != "" && record.StartedAt > 0 &&
+		record.FinishedAt >= record.StartedAt && record.FinishedAt <= time.Now().Unix()+60 &&
+		(record.Result == "success" || record.Result == "failed")
+	var latestStart int64
+	matched := false
 	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) > 0 && strings.HasPrefix(f[0], "ansgo-upgrade-") && strings.HasSuffix(f[0], ".service") {
-			units = append(units, f[0])
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		name := fields[0]
+		if name != "ansgo-autoupgrade.service" && !(strings.HasPrefix(name, "ansgo-upgrade-") && strings.HasSuffix(name, ".service")) {
+			continue
+		}
+		propsOut, showErr := command("systemctl", "show", name, "-p", "ActiveState", "-p", "InvocationID", "-p", "ExecMainStartTimestamp").Output()
+		if showErr != nil {
+			return unit, running, "", showErr
+		}
+		props := map[string]string{}
+		for _, prop := range strings.Split(string(propsOut), "\n") {
+			k, v, ok := strings.Cut(prop, "=")
+			if ok {
+				props[k] = v
+			}
+		}
+		if props["ActiveState"] == "active" || props["ActiveState"] == "activating" {
+			running = true
+		}
+		if name != "ansgo-autoupgrade.service" && name > unit {
+			unit = name
+		}
+		started, _ := time.Parse("Mon 2006-01-02 15:04:05 MST", props["ExecMainStartTimestamp"])
+		if !started.IsZero() {
+			latestStart = max(latestStart, started.Unix())
+		}
+		if ns, parseErr := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(name, "ansgo-upgrade-"), ".service"), 10, 64); parseErr == nil {
+			latestStart = max(latestStart, ns/int64(time.Second))
+		}
+		if record.TaskID == strings.TrimSuffix(name, ".service") || record.TaskID == props["InvocationID"] {
+			matched = true
 		}
 	}
-	if len(units) == 0 {
-		return "", false, "", nil
+	// 旧任务结果不能冒充新任务；CLI 任务无 transient unit 时由启动时间确定新旧。
+	if unit != "" && record.StartedAt <= latestStart && strings.HasPrefix(record.TaskID, "ansgo-upgrade-") && record.TaskID != strings.TrimSuffix(unit, ".service") {
+		valid = false
 	}
-	sort.Strings(units)
-	unit = units[len(units)-1]
-	out, err = command("systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "Result", "-p", "ExecMainStatus").Output()
-	if err != nil {
-		return unit, false, "", err
-	}
-	props := map[string]string{}
-	for _, line := range strings.Split(string(out), "\n") {
-		k, v, ok := strings.Cut(line, "=")
-		if ok {
-			props[k] = v
-		}
-	}
-	running = props["ActiveState"] == "activating" || props["ActiveState"] == "deactivating" || props["SubState"] == "running" || props["SubState"] == "start"
-	if !running {
-		if props["Result"] == "success" && props["ExecMainStatus"] == "0" {
-			result = "success"
-		} else {
-			result = "failed"
-		}
+	if !running && valid && record.StartedAt >= latestStart && (matched || record.StartedAt > latestStart || (unit == "" && latestStart == 0)) {
+		result = record.Result
 	}
 	return
 }
@@ -239,7 +284,7 @@ func systemUpgradeHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, "无法查询升级状态: "+err.Error())
 		return
 	}
-	if running || svcActive("ansgo-autoupgrade") == "active" {
+	if running {
 		jerr(w, 409, "已有升级正在运行")
 		return
 	}
@@ -247,7 +292,8 @@ func systemUpgradeHandler(w http.ResponseWriter, r *http.Request) {
 		_ = command("systemctl", "stop", unit).Run()
 		_ = command("systemctl", "reset-failed", unit).Run()
 	}
-	args := []string{fmt.Sprintf("--unit=ansgo-upgrade-%d", time.Now().UnixNano()), "--no-block", "--property=Type=oneshot", "--property=RemainAfterExit=yes", binUpgrade, "--yes"}
+	taskID := fmt.Sprintf("ansgo-upgrade-%d", time.Now().UnixNano())
+	args := []string{"--unit=" + taskID, "--setenv=ANSGO_UPGRADE_TASK_ID=" + taskID, "--no-block", "--property=Type=oneshot", binUpgrade, "--yes"}
 	if b.Version != "" {
 		args = append(args, "--ver", b.Version)
 	}
@@ -337,7 +383,6 @@ func systemCleanupHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, "缺少可执行命令 "+binAdmin)
 		return
 	}
-	before := cleanupUsage()
 	out, err := command(binAdmin, "prune", "--yes").CombinedOutput()
 	if err == nil {
 		err = cleanupSessions(db)
@@ -346,10 +391,19 @@ func systemCleanupHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, commandError("清理", out, err).Error())
 		return
 	}
-	after := cleanupUsage()
-	freed := before - after
-	if freed < 0 {
-		freed = 0
+	var freed int64
+	found := false
+	for _, line := range strings.Split(string(out), "\n") {
+		if value, ok := strings.CutPrefix(line, "FREED_BYTES="); ok {
+			n, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if parseErr == nil && n >= 0 {
+				freed, found = n, true
+			}
+		}
+	}
+	if !found {
+		jerr(w, 500, "清理命令未返回有效 FREED_BYTES")
+		return
 	}
 	jwrite(w, 200, map[string]any{"ok": true, "freed_bytes": freed, "log": string(out)})
 }
@@ -371,13 +425,4 @@ func reloadProxyServices() error {
 		}
 	}
 	return nil
-}
-
-func cleanupUsage() int64 {
-	var total int64
-	for _, path := range []string{"/etc/ansgo-backup", "/var/log/ansgo", "/var/log/journal", "/run/log/journal", "/etc/ansgo/probe-tmp"} {
-		size, _ := pathUsage(path)
-		total += size
-	}
-	return total
 }

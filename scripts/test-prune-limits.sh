@@ -206,4 +206,57 @@ assert 'LANDING_1_PASS=oldpass' in open(root+'/etc/ansgo/secrets.env').read()
 assert os.stat(root+'/etc/ansgo/panel.json').st_mode & 0o777 == 0o600
 print('PASS migration: 旧落地/凭证幂等迁移、0600、新字段默认值，保留 Go schema 迁移入口')
 PY
+# 管理标记仍在、但主体已被用户编辑时也不能覆盖。
+file="$ANSGO_ROOT/etc/systemd/system/sing-box.service.d/10-ansgo-limits.conf"
+printf '\n# user edit\n' >> "$file"
+cp "$file" "$TMP/user-limits"
+ANSGO_MEM_MB=2048 ansgo_limits > "$TMP/limits-output"
+cmp "$file" "$TMP/user-limits"
+grep -q '保留用户资源配置' "$TMP/limits-output"
+echo 'PASS limits: 内容指纹匹配才更新，保留带管理标记的用户编辑'
+python3 - "$ANSGO_ROOT" "$PROJECT" <<'PYCOMPAT'
+import json, os, pathlib, re, shutil, subprocess, sys
+root, project = map(pathlib.Path, sys.argv[1:])
+conf = root/'etc/ansgo/panel.json'
+secrets = root/'etc/ansgo/secrets.env'
+admin = (project/'deploy/ansgo-admin').read_text()
+def fn(name):
+    return re.search(r'^'+re.escape(name)+r'\(\).*?^}', admin, re.M|re.S)[0]
+for value in ['two words', 'a$b', "O'Reilly", r'abc\def', ' padded ']:
+    for wrapped in [value, "'"+value+"'", '"'+value+'"']:
+        conf.write_text(json.dumps(dict(svc_ss_enabled='false', landings=[])))
+        secrets.write_text('ANYTLS_PASS='+wrapped+'\nANYTLS2_PASS='+wrapped+'\nANYTLS2_UUID=example-id\n')
+        for suffix in ('', '-wal', '-shm'):
+            p = root/('etc/ansgo/sessions.db'+suffix)
+            p.touch(); p.chmod(0o644)
+        command = 'source "$ANSGO_LIB"; ansgo_migrate "$1" "$2"; ansgo_migrate "$1" "$2"'
+        subprocess.run(['bash','-ec',command,'_',str(conf),str(secrets)],check=True)
+        text = secrets.read_text()
+        assert 'ANYTLS_PASS='+wrapped+'\n' in text, repr(text)
+        assert 'LANDING_1_PASS='+value+'\n' in text, repr(text)
+        assert 'ANYTLS2_PASS=' not in text
+        shell = fn('_secret')+'\n'+fn('_setsecret')+'\nSECRETS="$1"; _secret ANYTLS_PASS; _secret LANDING_1_PASS; _setsecret ANYTLS_PASS "$2"; _secret ANYTLS_PASS'
+        out = subprocess.check_output(['bash','-ec',shell,'_',str(secrets),value],text=True)
+        assert out.splitlines() == [value,value,value], repr(out)
+        for suffix in ('', '-wal', '-shm'):
+            assert (root/('etc/ansgo/sessions.db'+suffix)).stat().st_mode & 0o777 == 0o600
+print('PASS secrets: 迁移幂等/逐字保留、admin 读写兼容四类历史密码；已有 SQLite/sidecar 权限修复')
+for keep in (5, 1):
+    base = root/'etc/ansgo-backup'
+    shutil.rmtree(base); base.mkdir()
+    conf.write_text(json.dumps(dict(backup_keep=keep)))
+    for category in ('upgrade','manual'):
+        for i in range(1,7):
+            (base/(category+'-20261024-12000'+str(i)+'.tar.gz')).write_bytes(b'x')
+    # 权限探针不是真实 SQLite 文件，清理前移除。
+    for suffix in ('', '-wal', '-shm'):
+        (root/('etc/ansgo/sessions.db'+suffix)).unlink()
+    out = subprocess.check_output(['bash',str(project/'deploy/ansgo-admin'),'prune','--yes'],text=True)
+    assert len(list(base.glob('upgrade-*'))) == min(keep,2)
+    assert len(list(base.glob('manual-*'))) == keep
+    assert re.search(r'^FREED_BYTES=\d+$',out,re.M)
+    for suffix in ('', '-wal', '-shm'):
+        (root/('etc/ansgo/sessions.db'+suffix)).touch()
+print('PASS prune: 升级备份 min(2, backup_keep)，其他类别 backup_keep')
+PYCOMPAT
 printf 'ALL PRUNE/LIMITS TESTS PASSED\n'

@@ -14,6 +14,7 @@ extract_fn(){
 eval "$(extract_fn "$PROJECT/install.sh" ansgo_verify_elf)"
 eval "$(extract_fn "$PROJECT/deploy/upgrade.sh" verify_elf)"
 eval "$(extract_fn "$PROJECT/deploy/upgrade.sh" current_version)"
+eval "$(extract_fn "$PROJECT/deploy/upgrade.sh" write_result)"
 python3 - "$TMP" <<'PY'
 import pathlib,struct,sys
 root=pathlib.Path(sys.argv[1])
@@ -90,4 +91,19 @@ for driver in ('json-file','journald'):
         assert int(cfg['services']['other']['mem_limit'])==67108864
 print('PASS compose: 各约束独立补齐、空 options、用户日志驱动/内存保留、美元符号保真')
 PY
+RESULT="$TMP/upgrade.result"
+TASK_ID=example-upgrade-task
+TASK_STARTED=$(date +%s)
+write_result success
+python3 - "$RESULT" "$TASK_ID" "$TASK_STARTED" <<'PY'
+import json, os, sys
+p, task, started = sys.argv[1:]
+d = json.load(open(p))
+assert d['result'] == 'success' and d['task_id'] == task
+assert d['started_at'] == int(started) and d['finished_at'] >= int(started)
+assert os.stat(p).st_mode & 0o777 == 0o600
+assert not os.path.exists(p+'.tmp')
+print('PASS upgrade.result: 原子 JSON、任务 ID、起止时间及 0600')
+PY
+python3 "$PROJECT/scripts/test-download-sources.py"
 echo 'ALL UPGRADE TESTS PASSED'

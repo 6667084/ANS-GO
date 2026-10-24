@@ -4,7 +4,7 @@
 #
 # 单一事实来源：
 #   /etc/ansgo/panel.json    端口 + 面板设置 + 域名 + 第2组服务 + 落地配置 (JSON)
-#   /etc/ansgo/secrets.env   SS_KEY / ANYTLS_* / SOCKS_* / NAIVE_* / 第2组密钥 (shell 可 source)
+#   /etc/ansgo/secrets.env   SS_KEY / ANYTLS_* / SOCKS_* / NAIVE_* / 第2组密钥 (原始 KEY=value，仅去掉成对外层引号)
 #   /etc/ssl/ansgo/*.pem     共享真实证书
 #
 # 用法:
@@ -172,11 +172,11 @@ secrets = {}
 if os.path.exists(SECRETS):
     with open(SECRETS) as f:
         for line in f:
-            line = line.strip()
+            line = line.rstrip('\r\n')
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, _, v = line.partition("=")
-            secrets[k.strip()] = v.strip().strip('"')
+            secrets[k.strip()] = v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"') else v
 
 def sec(k):
     v = secrets.get(k, "")

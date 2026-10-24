@@ -88,7 +88,14 @@ ansgo_limits(){
     high=$((max * 80 / 100)); gomem=$((high * 80 / 100))
     file="$root/etc/systemd/system/$unit.service.d/10-ansgo-limits.conf"
     mkdir -p "$(dirname "$file")" || return 1
-    if [ -e "$file" ] && ! grep -q '^# managed-by: ansgo$' "$file"; then
+    if [ -e "$file" ] && ! python3 - "$file" <<'PYHASH'
+import hashlib, sys
+lines = open(sys.argv[1], 'rb').readlines()
+hashes = [x[len(b'# ansgo-hash: '):].strip() for x in lines if x.startswith(b'# ansgo-hash: ')]
+body = b''.join(x for x in lines if not x.startswith(b'# ansgo-hash: '))
+sys.exit(0 if hashes == [hashlib.sha256(body).hexdigest().encode()] else 1)
+PYHASH
+    then
       printf '保留用户资源配置: %s\n' "$file"
       continue
     fi
@@ -106,6 +113,14 @@ Environment=GOMEMLIMIT=${gomem}MiB
 LimitNOFILE=65535
 EOF
     then rm -rf "$tmp"; return 1; fi
+    python3 - "$tmp/limits" <<'PYHASH'
+import hashlib, sys
+p = sys.argv[1]
+body = open(p, 'rb').read()
+with open(p, 'wb') as f:
+    f.write(b'# ansgo-hash: '+hashlib.sha256(body).hexdigest().encode()+b'\n'+body)
+PYHASH
+    [ "$?" = 0 ] || { rm -rf "$tmp"; return 1; }
     chmod 644 "$tmp/limits"
     mv "$tmp/limits" "$file" || { rm -rf "$tmp"; return 1; }
     rm -rf "$tmp"
@@ -178,7 +193,7 @@ PY
 
 ansgo_migrate(){
   python3 - "$1" "$2" <<'PY'
-import base64, json, os, random, shlex, sys, tempfile
+import base64, json, os, random, sys, tempfile
 conf, secrets = sys.argv[1:]
 d = json.load(open(conf))
 def atomic(path, data):
@@ -221,8 +236,11 @@ if os.path.exists(secrets):
     for line in lines:
         if '=' in line and not line.lstrip().startswith('#'):
             k, v = line.split('=', 1)
-            parts = shlex.split(v)
-            data[k] = parts[0] if len(parts) == 1 else v
+            v = v.rstrip('\r')
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                v = v[1:-1]
+            data[k.strip()] = v
+    original = data.copy()
     for suffix in ('PASS','UUID'):
         old, new = 'ANYTLS2_'+suffix, 'LANDING_1_'+suffix
         if old in data:
@@ -240,11 +258,21 @@ if os.path.exists(secrets):
             raw = os.urandom(want)
             print('旧 SS2022 密钥非法，已重置，请重新复制 SS 节点')
         data['SS_KEY'] = base64.b64encode(raw).decode()
-    # 与现有 Go/Python 简单解析器兼容：普通安全值不加引号；危险 shell 字符拒绝。
-    for k, v in data.items():
-        if not k.replace('_','').isalnum() or any(c in v for c in "'\n\r$`\\\";|&()<>\t "):
-            raise ValueError('secrets.env 含不安全值，请先通过面板重设该字段: '+k)
-    atomic(secrets, ''.join(k+'='+v+'\n' for k,v in data.items()))
+    # 未改字段逐字保留（包括历史引号）；迁移只改名或追加必需字段，不执行 shell。
+    out = []
+    for line in lines:
+        k = line.split('=', 1)[0].strip() if '=' in line and not line.lstrip().startswith('#') else None
+        if k in ('ANYTLS2_PASS', 'ANYTLS2_UUID'):
+            continue
+        if k in data and data[k] != original.get(k):
+            line = k+'='+data[k]
+        out.append(line)
+    out.extend(k+'='+v for k, v in data.items() if k not in original)
+    atomic(secrets, '\n'.join(out)+'\n')
+# 升级及容器启动一并修复旧会话库权限。
+for suffix in ('', '-wal', '-shm'):
+    path = os.path.join(os.path.dirname(conf), 'sessions.db'+suffix)
+    if os.path.exists(path): os.chmod(path, 0o600)
 atomic(conf, json.dumps(d, ensure_ascii=False, indent=2)+'\n')
 PY
 }

@@ -414,6 +414,9 @@ printf 'ActiveState=activating\nSubState=start\nResult=success\nExecMainStatus=0
 		}
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldResult, oldLock := upgradeResultPath, upgradeLockPath
+	upgradeResultPath, upgradeLockPath = filepath.Join(dir, "result.json"), filepath.Join(dir, "lock")
+	t.Cleanup(func() { upgradeResultPath, upgradeLockPath = oldResult, oldLock })
 	old := binUpgrade
 	binUpgrade = filepath.Join(dir, "ansgo-upgrade")
 	t.Cleanup(func() { binUpgrade = old })
@@ -441,20 +444,27 @@ printf 'ActiveState=activating\nSubState=start\nResult=success\nExecMainStatus=0
 		t.Fatalf("升级未互斥: %v", counts)
 	}
 	argv, _ := os.ReadFile(args)
-	for _, flag := range []string{"--no-block", "--property=Type=oneshot", "--property=RemainAfterExit=yes", binUpgrade, "--yes", "--ver", "v1.6.0"} {
+	for _, flag := range []string{"--no-block", "--property=Type=oneshot", binUpgrade, "--yes", "--ver", "v1.6.0"} {
 		if !strings.Contains(string(argv), flag+"\n") {
 			t.Fatalf("脱离 cgroup 参数缺失: %s", flag)
 		}
 	}
+	unitData, _ := os.ReadFile(units)
+	task := strings.Fields(string(unitData))[0]
 	for _, state := range []struct {
 		props, result string
 		running       bool
 	}{
 		{"ActiveState=activating\nSubState=start\nResult=success\nExecMainStatus=0\n", "", true},
-		{"ActiveState=active\nSubState=exited\nResult=success\nExecMainStatus=0\n", "success", false},
+		{"ActiveState=inactive\nSubState=dead\nResult=success\nExecMainStatus=0\n", "success", false},
+		{"ActiveState=active\nSubState=running\n", "", true},
 		{"ActiveState=failed\nSubState=failed\nResult=exit-code\nExecMainStatus=1\n", "failed", false},
 	} {
 		if err := os.WriteFile(props, []byte(state.props), 0600); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(upgradeResult{Result: state.result, TaskID: strings.TrimSuffix(task, ".service"), StartedAt: time.Now().Unix(), FinishedAt: time.Now().Unix()})
+		if err := os.WriteFile(upgradeResultPath, data, 0600); err != nil {
 			t.Fatal(err)
 		}
 		w := httptest.NewRecorder()

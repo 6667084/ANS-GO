@@ -346,6 +346,21 @@ func initDB(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
+	// 先以私有权限创建，SQLite 派生的 WAL/SHM 也会继承数据库权限。
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	if err = f.Chmod(0600); err != nil {
+		f.Close()
+		return err
+	}
+	f.Close()
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Chmod(path+suffix, 0600); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
 	d, err := sql.Open("sqlite", path)
 	if err != nil {
 		return err

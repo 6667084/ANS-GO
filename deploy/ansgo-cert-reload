@@ -13,6 +13,8 @@
 set -uo pipefail
 rc=0
 for svc in caddy sing-box; do
+  # 面板事务先校验证书与生成配置，随后自行重启代理服务。
+  [ "${ANSGO_SKIP_PROXY_RESTART:-0}" != 1 ] || continue
   case "$svc" in caddy) config=/etc/caddy/Caddyfile;; *) config=/etc/sing-box/config.json;; esac
   if [ -f "$config" ] && systemctl is-active --quiet "$svc"; then
     if ! systemctl restart "$svc" || ! systemctl is-active --quiet "$svc"; then
