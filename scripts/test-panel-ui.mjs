@@ -144,6 +144,29 @@ await test('仪表盘健康检测为次级按钮；内容焦点无青色边框�
   assert.match(html, /\.content:focus-visible\{outline:none\}/);
   assert.doesNotMatch(html, /animation:appear|@keyframes appear/);
 });
+await test('仪表盘、服务与落地健康检测显示摘要、展开详情及 direct 提示', async () => {
+  const b = await boot({ docker: true });
+  for (const tab of ['dash', 'mgmt', 'landing']) {
+    await b.tab(tab);
+    const root = tab === 'dash' ? b.document.querySelector('[data-fold="dash.services"]')
+      : b.get(tab === 'mgmt' ? 'state.services.get("ss").root' : 'state.landings.get("1").root');
+    await click(findButton(root, '健康检测'));
+    const box = root.querySelector('.diagnostic');
+    assert.ok(box?.isConnected); assert.equal(box.hidden, false);
+    assert.match(box.textContent, /假数据：入口与 TCP 握手正常/);
+    const details = box.querySelector('details');
+    assert.equal(details.open, false);
+    assert.equal(details.querySelector('summary').textContent, '展开详情');
+    details.open = true;
+    assert.match(details.textContent, /端口监听.*TCP 握手/);
+    assert.match(details.textContent, /Docker 共享宿主时间/);
+    if (tab === 'landing') assert.match(box.textContent, /未启用远端出口（走 direct）/);
+  }
+  b.ctx.intercept = key => key === 'health' ? { status: 200, body: { ok: true, enabled: true, active: 'failed', summary: '<错误>：启动限速', landing_remote: 'no', landing_remote_reason: '远端不可达' } } : null;
+  const root = b.get('state.landings.get("1").root');
+  await click(findButton(root, '健康检测'));
+  assert.match(root.querySelector('.diagnostic').textContent, /需要关注.*<错误>：启动限速.*远端不可达/);
+});
 await test('manual 填凭证后直接签发切换，失败日志可见且按钮恢复', async () => {
   const b = await boot({ certMode: 'manual', dynu: 'none' }); await b.tab('cert');
   const e = b.get('state.cert'), action = findButton(e.form.root, '签发并切换到 ACME');

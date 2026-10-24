@@ -18,6 +18,36 @@ import (
 	"time"
 )
 
+func TestExplicitServiceStartClearsRateLimit(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls")
+	t.Setenv("SYSTEMCTL_TEST_LOG", logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "$SYSTEMCTL_TEST_LOG"
+case "$1" in
+reset-failed) exit 1;;
+is-active) echo active;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"start", "restart", "stop"} {
+		if err := systemctl(action, "sing-box"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := restartVerify("caddy"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(logPath)
+	want := "reset-failed sing-box\nstart sing-box\nreset-failed sing-box\nrestart sing-box\nstop sing-box\nreset-failed caddy\nrestart caddy\nis-active caddy\n"
+	if err != nil || string(got) != want {
+		t.Fatalf("调用顺序错误: %q, %v", got, err)
+	}
+}
+
 func TestSecretsLiteralCompatibility(t *testing.T) {
 	landingFixture(t)
 	for _, value := range []string{"two words", "a$b", "O'Reilly", `abc\def`, " padded ", `"one`, `two"`} {

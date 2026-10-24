@@ -715,7 +715,7 @@ do_uninstall(){
   [ "$(id -u)" = 0 ] || { err "需 root 运行"; exit 1; }
   local PURGE="${PURGE:-0}"
 
-  hr "ANS-GO 卸载（purge=$PURGE）"
+  hr "ANS-GO 卸载（purge=${PURGE}）"
 
   # ---- 检测部署模式 ----
   local HAS_DOCKER=0 HAS_METAL=0
@@ -724,9 +724,15 @@ do_uninstall(){
     || [ -x /usr/local/bin/ansgo-panel ]; } && HAS_METAL=1
 
   if [ "$HAS_DOCKER" = 0 ] && [ "$HAS_METAL" = 0 ]; then
-    warn "未检测到 ANS-GO 部署痕迹（无 /etc/ansgo-docker、无 /etc/ansgo/、无 systemd unit）"
-    warn "可能从未安装，或已卸载。退出。"
-    exit 0
+    if [ "$PURGE" = 1 ] && { [ -d /etc/ansgo-backup ] || [ -d /var/lib/ansgo ] \
+      || [ -d /var/log/ansgo ] || [ -f /etc/ansgo-cert.status ] \
+      || compgen -G '/etc/ansgo-backup-*' >/dev/null; }; then
+      warn "仅检测到备份/维护数据，将继续清除残留"
+    else
+      warn "未检测到 ANS-GO 部署痕迹（无 /etc/ansgo-docker、无 /etc/ansgo/、无 systemd unit）"
+      warn "可能从未安装，或已卸载。退出。"
+      exit 0
+    fi
   fi
 
   echo "检测到的部署模式：$([ "$HAS_DOCKER" = 1 ] && echo 'Docker ')$([ "$HAS_METAL" = 1 ] && echo '裸金属')"
@@ -773,7 +779,7 @@ do_uninstall(){
     fi
     if [ "$PURGE" = 1 ]; then
       rm -rf /etc/ansgo-docker
-      ok "[Docker] 已删除 /etc/ansgo-docker/（含 ansgo.env + compose）"
+      log "[Docker] 已删除 /etc/ansgo-docker/（含 ansgo.env + compose）"
     else
       warn "[Docker] 保留 /etc/ansgo-docker/（含凭证，重装可复用）"
     fi
@@ -800,7 +806,6 @@ do_uninstall(){
       rm -f /usr/local/bin/sing-box /usr/local/bin/caddy
       rm -rf /etc/ansgo /etc/ssl/ansgo /etc/sing-box /etc/caddy /var/www/html
       rm -rf /root/.acme.sh /etc/ansgo-deploy
-      rm -rf /etc/ansgo-backup-* /etc/ansgo-uninstall-backup-*
       rm -f /etc/sysctl.d/99-ansgo-tune.conf /etc/security/limits.d/99-ansgo.conf
       rm -f /etc/systemd/journald.conf.d/60-ansgo.conf
       rm -rf /etc/systemd/system/ansgo-panel.service.d \
@@ -809,13 +814,18 @@ do_uninstall(){
       rm -f /etc/systemd/system/ansgo-autoupgrade.service \
             /etc/systemd/system/ansgo-autoupgrade.timer \
             /usr/local/bin/ansgo-limits /usr/local/bin/ansgo-upgrade
-      ok "[裸金属] 配置/密钥/证书/备份/调优已彻底删除"
+      log "[裸金属] 配置/密钥/证书/备份/调优已彻底删除"
     else
-      ok "[裸金属] 配置保留在 /etc/ansgo/ /etc/ssl/ansgo/（--purge 可彻底删）"
+      log "[裸金属] 配置保留在 /etc/ansgo/ /etc/ssl/ansgo/（--purge 可彻底删）"
     fi
   fi
 
-  hr "卸载完成（purge=$PURGE）"
+  if [ "$PURGE" = 1 ]; then
+    rm -rf /etc/ansgo-backup /etc/ansgo-backup-* /etc/ansgo-uninstall-backup-* \
+           /var/lib/ansgo /var/log/ansgo
+    rm -f /etc/ansgo-cert.status
+  fi
+  hr "卸载完成（purge=${PURGE}）"
   [ "$PURGE" = 0 ] && echo "提示：彻底删除一切请重跑  bash install.sh --uninstall --purge"
   echo "注：未卸载 docker 本体（可能被其他服务使用）；如需卸载 docker 请手动执行。"
   exit 0
@@ -1328,6 +1338,7 @@ if [ "$NO_CADDY" = 1 ]; then
   log "跳过 caddy 启动（--no-caddy 模式；80/443 由现有 web 服务器接管）"
 else
   systemctl enable caddy >/dev/null 2>&1 || true
+  systemctl reset-failed caddy 2>/dev/null || true
   systemctl restart caddy \
     && log "caddy 已启动（:443 伪装站）" \
     || { err "caddy 启动失败（域名直访伪装站不可用；代理服务不受影响）"; err "  排查: journalctl -u caddy -n 30 / caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile"; exit 1; }
@@ -1357,6 +1368,7 @@ systemctl daemon-reload
 PANEL_PW="${PANEL_PASSWORD_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
 /usr/local/bin/ansgo-panel -setpass "$PANEL_PW" || { err "管理员密码设置失败"; exit 1; }
 systemctl enable ansgo-panel >/dev/null 2>&1 || true
+systemctl reset-failed ansgo-panel 2>/dev/null || true
 systemctl restart ansgo-panel || exit 1
 sleep 2
 systemctl is-active --quiet ansgo-panel || { err "面板未运行，检查 journalctl -u ansgo-panel"; exit 1; }

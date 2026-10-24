@@ -17,6 +17,7 @@ for svc in caddy sing-box; do
   [ "${ANSGO_SKIP_PROXY_RESTART:-0}" != 1 ] || continue
   case "$svc" in caddy) config=/etc/caddy/Caddyfile;; *) config=/etc/sing-box/config.json;; esac
   if [ -f "$config" ] && systemctl is-active --quiet "$svc"; then
+    systemctl reset-failed "$svc" 2>/dev/null || true
     if ! systemctl restart "$svc" || ! systemctl is-active --quiet "$svc"; then
       printf '证书重载失败: %s\n' "$svc" >&2
       rc=1
@@ -29,6 +30,6 @@ if [ "${ANSGO_SKIP_PANEL_RESTART:-0}" != 1 ] && systemctl is-active --quiet ansg
   command -v systemd-run >/dev/null || { echo '缺少 systemd-run，无法安全重启面板' >&2; exit 1; }
   # acme.sh reloadcmd 可能在签发子进程中执行；用独立 transient unit 延迟重启，避免自杀。
   systemd-run --quiet --collect --unit="ansgo-cert-panel-reload-$(date +%s)-$$" --on-active=3s \
-    /bin/systemctl restart ansgo-panel || exit 1
+    /bin/sh -c '/bin/systemctl reset-failed ansgo-panel 2>/dev/null; exec /bin/systemctl restart ansgo-panel' || exit 1
 fi
 exit 0

@@ -98,7 +98,10 @@ finish(){
       systemctl daemon-reload
       for svc in caddy sing-box ansgo-panel; do
         if printf "%s\n" "${OLD_ENABLED[@]:-}" | grep -qx "$svc"; then systemctl enable "$svc" || restore_rc=1; else systemctl disable "$svc" || restore_rc=1; fi
-        if printf "%s\n" "${OLD_ACTIVE[@]:-}" | grep -qx "$svc"; then systemctl restart "$svc" && systemctl is-active --quiet "$svc" || restore_rc=1; fi
+        if printf "%s\n" "${OLD_ACTIVE[@]:-}" | grep -qx "$svc"; then
+          systemctl reset-failed "$svc" 2>/dev/null || true
+          systemctl restart "$svc" && systemctl is-active --quiet "$svc" || restore_rc=1
+        fi
       done
       [ "$restore_rc" = 0 ] || say "自动回滚未完全成功，请使用备份恢复: $BACKUP"
     else
@@ -106,10 +109,12 @@ finish(){
     fi
   fi
   if [ "$rc" -ne 0 ] && [ "$DOCKER_PAUSED" = 1 ] && [ "$MUTATED" = 0 ]; then
+    docker exec "$CID" systemctl reset-failed ansgo-panel 2>/dev/null || true
     docker exec "$CID" systemctl start ansgo-panel cron || true
   fi
   if [ "$rc" -ne 0 ] && [ "$METAL_PAUSED" = 1 ] && [ "$MUTATED" = 0 ]; then
     if printf '%s\n' "${OLD_ACTIVE[@]:-}" | grep -qx ansgo-panel; then
+      systemctl reset-failed ansgo-panel 2>/dev/null || true
       systemctl start ansgo-panel || true
     fi
   fi
@@ -202,6 +207,7 @@ dl(){ trim_log; curl --connect-timeout 10 --max-time 180 --retry 2 -fsSL "$1" -o
 dl "$RAW/ansgo-limits" "$STAGE/ansgo-limits"
 bash -n "$STAGE/ansgo-limits"
 source "$STAGE/ansgo-limits"
+ansgo_secure_backups
 ansgo_logs_init
 verify_elf(){
   python3 - "$1" "$AARCH" "${2:-}" <<'PY'
@@ -349,6 +355,7 @@ PY
   done
   for f in "${needed[@]}"; do
     # 三个二进制本次均刷新；关闭的载体不启动。
+    systemctl reset-failed "$f" 2>/dev/null || true
     systemctl restart "$f"
     wait_active "$f"
   done

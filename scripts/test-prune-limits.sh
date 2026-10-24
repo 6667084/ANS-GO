@@ -65,6 +65,29 @@ for sub,name,age in [('etc/ansgo/probe-tmp','old.json',700),('etc/ansgo/probe-tm
     p=root/sub/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('test')
     os.utime(p,(time.time()-age,time.time()-age))
 (backup/'user-file').write_text('keep')
+# 模拟旧 admin 的宽权限双份备份，并放链接验证不越界 chmod。
+for suffix in ('', '.tar.gz'):
+    p=root/('etc/ansgo-backup-20260101-000000'+suffix)
+    if suffix: p.write_bytes(b'secrets');p.chmod(0o644)
+    else:
+        p.mkdir();p.chmod(0o755)
+        (p/'secrets.env').write_text('EXAMPLE=secret');(p/'secrets.env').chmod(0o644)
+outside=root/'outside';outside.write_text('keep mode');outside.chmod(0o644)
+(backup/'outside-link').symlink_to(outside)
+PY
+# 升级和 prune 共用权限修复，幂等且不需要删除备份。
+ansgo_secure_backups
+ansgo_secure_backups
+python3 - "$ANSGO_ROOT" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1])
+directory=root/'etc/ansgo-backup-20260101-000000'
+assert directory.stat().st_mode & 0o777 == 0o700
+assert (directory/'secrets.env').stat().st_mode & 0o777 == 0o600
+# 恢复成旧权限，确认 prune 自己也会修复，不依赖升级先跑过。
+(directory/'secrets.env').chmod(0o644)
+directory.chmod(0o644)
+(root/'etc/ansgo-backup-20260101-000000.tar.gz').chmod(0o644)
 PY
 OUT=$(bash "$PROJECT/deploy/ansgo-admin" prune --yes)
 printf '%s\n' "$OUT"
@@ -81,7 +104,14 @@ assert (root/'tmp/sing-box-fresh').exists() and (root/'tmp/unrelated').exists()
 assert (base/'user-file').exists()
 assert re.fullmatch(r'FREED_BYTES=\d+',sys.argv[2].splitlines()[-1])
 assert int(sys.argv[2].split('=')[-1])>0
+for path in [base, root/'etc/ansgo-backup-20260101-000000']:
+    assert path.stat().st_mode & 0o777 == 0o700
+for path in [root/'etc/ansgo-backup-20260101-000000.tar.gz',
+             root/'etc/ansgo-backup-20260101-000000/secrets.env', *base.glob('*.tar.gz')]:
+    assert path.stat().st_mode & 0o777 == 0o600
+assert (root/'outside').stat().st_mode & 0o777 == 0o644
 print('PASS prune: 分类别保留、旧路径、10分钟边界、不清理无关文件、释放字节')
+print('PASS backup permissions: 新旧位置 0700/0600，递归修复且不跟随链接')
 PY
 python3 - "$ANSGO_ROOT" <<'PY'
 import pathlib,sys
@@ -99,6 +129,12 @@ with sqlite3.connect(sys.argv[1]+'/etc/ansgo/sessions.db') as db:
     db.execute('create table sessions(token text, expires integer)');db.execute("insert into sessions values ('test', 9999999999)")
 PY
 archive=$(ansgo_backup test /etc/ansgo/panel.json /etc/ansgo/secrets.env /etc/ansgo/sessions.db /etc/ansgo/absent)
+python3 - "$archive" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1])
+assert p.stat().st_mode & 0o777 == 0o600
+assert p.parent.stat().st_mode & 0o777 == 0o700
+PY
 printf 'broken' > "$ANSGO_ROOT/etc/ansgo/secrets.env"
 printf 'new' > "$ANSGO_ROOT/etc/ansgo/absent"
 ansgo_restore "$archive"

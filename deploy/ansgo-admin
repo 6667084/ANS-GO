@@ -64,7 +64,7 @@ PYSEC
 # ss / anytls 都由 sing-box 承载；naive 由 caddy 承载；panel 独立
 svc_of(){ case "$1" in ss|anytls|socks) echo sing-box;; naive|caddy) echo caddy;; panel) echo ansgo-panel;; *) echo "$1";; esac; }
 
-restart_svc(){ local s="$1"; systemctl restart "$s" && systemctl is-active --quiet "$s" && ok "已 restart $s" || { err "restart $s 失败"; return 1; }; }
+restart_svc(){ local s="$1"; systemctl reset-failed "$s" 2>/dev/null || true; systemctl restart "$s" && systemctl is-active --quiet "$s" && ok "已 restart $s" || { err "restart $s 失败"; return 1; }; }
 stop_svc(){ local s="$1"; systemctl stop "$s" 2>/dev/null && ok "已 stop $s" || err "stop $s 失败"; }
 
 # ---------- 备份 ----------
@@ -72,6 +72,7 @@ _restart_after_restore_failure(){
   local list="$1" svc rc=0
   for svc in caddy sing-box ansgo-panel; do
     printf '%s\n' "$list" | grep -qx "$svc" || continue
+    systemctl reset-failed "$svc" 2>/dev/null || true
     if systemctl restart "$svc" && systemctl is-active --quiet "$svc"; then
       ok "已恢复原运行服务 $svc"
     else
@@ -100,6 +101,7 @@ cmd_prune(){
     read -r -p "按保留策略清理备份、过期临时文件及日志？[y/N] " answer
     case "$answer" in y|Y) ;; *) return 0;; esac
   fi
+  ansgo_secure_backups || return 1
   local freed
   freed=$(python3 - "$ROOT" "$CONF" <<'PYPRUNE'
 import glob, json, os, re, shutil, sys, time

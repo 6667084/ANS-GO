@@ -507,7 +507,7 @@ func scheduleSelfRestart(seconds int) {
 	}
 	restartPending = true
 	go func() {
-		out, err := command("systemd-run", fmt.Sprintf("--unit=ansgo-panel-restart-%d", time.Now().UnixNano()), "--collect", "--timer-property=RemainAfterElapse=no", fmt.Sprintf("--on-active=%ds", seconds), "/bin/systemctl", "restart", "ansgo-panel").CombinedOutput()
+		out, err := command("systemd-run", fmt.Sprintf("--unit=ansgo-panel-restart-%d", time.Now().UnixNano()), "--collect", "--timer-property=RemainAfterElapse=no", fmt.Sprintf("--on-active=%ds", seconds), "/bin/sh", "-c", "/bin/systemctl reset-failed ansgo-panel 2>/dev/null; exec /bin/systemctl restart ansgo-panel").CombinedOutput()
 		if err != nil {
 			log.Printf("安排面板重启失败: %v: %s", err, out)
 			restartMu.Lock()

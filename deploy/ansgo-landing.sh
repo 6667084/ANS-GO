@@ -97,6 +97,7 @@ fi
 /usr/local/bin/ansgo-limits
 systemctl daemon-reload
 systemctl enable sing-box >/dev/null 2>&1
+systemctl reset-failed sing-box 2>/dev/null || true
 systemctl restart sing-box
 sleep 2
 systemctl is-active --quiet sing-box

@@ -2,6 +2,8 @@
 Description=ANS-GO Web 管理面板 (ansgo-panel)
 After=network-online.target nss-lookup.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple

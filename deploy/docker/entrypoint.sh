@@ -337,6 +337,7 @@ if [ "$NO_CADDY_MODE" = 1 ]; then
   if [ "$NAIVE_ON" = "true" ]; then
     log "--no-caddy 模式但 naive 已启用：启动 caddy（仅听 naive 端口，不碰 80/443）"
     systemctl enable caddy.service 2>/dev/null || true
+    systemctl reset-failed caddy.service 2>/dev/null || true
     systemctl restart caddy.service 2>/dev/null || true
   else
     log "--no-caddy 模式且 naive 未启用：不启动 caddy（80/443 由 nginx 等接管）"
@@ -374,6 +375,7 @@ except Exception:
 if [ "$SB_NEED" = 1 ]; then
   log "检测到启用的 sing-box 服务：enable + restart sing-box"
   systemctl enable sing-box.service 2>/dev/null || true
+  systemctl reset-failed sing-box.service 2>/dev/null || true
   systemctl restart sing-box.service 2>/dev/null || true
 else
   log "无启用的 sing-box 服务：sing-box 保持 disabled（面板内按需安装时再起）"

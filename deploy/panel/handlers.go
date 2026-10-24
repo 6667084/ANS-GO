@@ -461,7 +461,7 @@ func serviceHandler(w http.ResponseWriter, r *http.Request) {
 			needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.SvcSocksEnabled == "true" || len(enabledLandings(c)) > 0
 			if needSB {
 				_ = command("systemctl", "enable", "sing-box").Run()
-				_ = command("systemctl", "restart", "sing-box").Run()
+				_ = systemctl("restart", "sing-box")
 			} else {
 				_ = command("systemctl", "stop", "sing-box").Run()
 				_ = command("systemctl", "disable", "sing-box").Run()
@@ -600,7 +600,7 @@ func genconfRestartVerify(confTarget string) (active string, err error) {
 }
 
 func restartVerify(svc string) (string, error) {
-	if rerr := command("systemctl", "restart", svc).Run(); rerr != nil {
+	if rerr := systemctl("restart", svc); rerr != nil {
 		return "", fmt.Errorf("重启 %s 失败: %w", svc, rerr)
 	}
 	// 验证：等待最多 4 秒确认服务真的 active（非 deactivating/failed）。
@@ -2273,6 +2273,10 @@ func svcOfLog(t string) string {
 }
 
 func systemctl(action, svc string) error {
+	if action == "restart" || action == "start" {
+		// 显式操作先清除启动限速；systemd 自动重启仍受 unit 的限速保护。
+		_ = command("systemctl", "reset-failed", svc).Run()
+	}
 	return command("systemctl", action, svc).Run()
 }
 
@@ -2825,7 +2829,7 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Action == "install" || needProc {
 		_ = command("systemctl", "enable", procName).Run()
-		restartErr := command("systemctl", "restart", procName).Run()
+		restartErr := systemctl("restart", procName)
 		// v1.5.24：验证服务真的 active（旧版无脑返回 ok，caddy deactivating 时
 		// 用户以为装好了实际没跑起来）。等待最多 4 秒确认状态。
 		st := ""
@@ -2846,7 +2850,7 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 				oldNeedProc = original.CaddyEnable == "true" || original.SvcNaiveEnabled == "true"
 			}
 			if oldNeedProc {
-				_ = command("systemctl", "restart", procName).Run()
+				_ = systemctl("restart", procName)
 			} else {
 				_ = command("systemctl", "stop", procName).Run()
 			}

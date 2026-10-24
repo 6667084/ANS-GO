@@ -277,6 +277,27 @@ atomic(conf, json.dumps(d, ensure_ascii=False, indent=2)+'\n')
 PY
 }
 
+# 旧备份也含密钥；不跟随链接，避免改到项目备份之外的文件。
+ansgo_secure_backups(){
+  python3 - "${ANSGO_ROOT:-}" <<'PY'
+import glob, os, stat, sys
+root = sys.argv[1]
+def secure(path):
+    mode = os.lstat(path).st_mode
+    if stat.S_ISDIR(mode):
+        os.chmod(path, 0o700)
+        with os.scandir(path) as entries:
+            for entry in entries:
+                secure(entry.path)
+    elif stat.S_ISREG(mode):
+        os.chmod(path, 0o600)
+for pattern in ('/etc/ansgo-backup', '/etc/ansgo-backup-*',
+                '/etc/ansgo-docker/ansgo-etc-vol-backup-*.tgz'):
+    for path in glob.glob(root+pattern):
+        secure(path)
+PY
+}
+
 # 备份使用相对根路径及 manifest；SQLite 通过 backup API 获取一致快照。
 ansgo_backup(){
   local category="$1"; shift
