@@ -14,8 +14,10 @@ WORKDIR /src
 COPY panel/go.mod panel/go.sum ./
 RUN go mod download
 COPY panel/ .
+ARG PANEL_VERSION=1.6.0
+ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
-    go build -trimpath -ldflags "-s -w" -o /out/ansgo-panel .
+    go build -trimpath -ldflags "-s -w -X main.version=${PANEL_VERSION}" -o /out/ansgo-panel .
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata && \

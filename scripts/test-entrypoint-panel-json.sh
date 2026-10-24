@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO Docker entrypoint panel.json 初始化测试（v1.5.37，TDD）
+# ANS-GO Docker entrypoint panel.json 初始化测试（v1.6.0 契约，TDD）
 #
 # 覆盖：
 #   1. entrypoint 可提取 entrypoint_ensure_panel_json（含 JSON 转义）
@@ -107,9 +107,11 @@ assert json.load(open('$J'))['panel_title']=='NodeB'
 
 # 失败路径 1：目录不可写
 RO="$TMP/rodir"; mkdir -p "$RO"; chmod 500 "$RO"
-entrypoint_ensure_panel_json "$RO/x.json" 2>"$TMP/ro.err"; RRC=$?
+# root 无视 DAC 权限；用父路径为普通文件让 mkdir/write 必然失败，跨 root 环境稳定。
+printf x > "$TMP/notdir"
+entrypoint_ensure_panel_json "$TMP/notdir/x.json" 2>"$TMP/ro.err"; RRC=$?
 chmod 700 "$RO" 2>/dev/null
-if [ "$RRC" -ne 0 ] && [ ! -f "$RO/x.json" ] && ! ls "$RO"/*.tmp* >/dev/null 2>&1; then
+if [ "$RRC" -ne 0 ] && [ ! -f "$RO/x.json" ] && ! ls "$TMP"/*.tmp* >/dev/null 2>&1; then
   ok "目录不可写：失败不被吞（rc=${RRC}），无输出/无 tmp 残留"
 else
   no "目录不可写时失败被吞（rc=${RRC}）或残留 tmp"

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # =============================================================================
 # ansgo-cert-reload —— 证书续期/替换后按需重载三服务
 #
@@ -10,21 +10,23 @@
 # 注：caddy 因 Caddyfile 设了 admin off，reload 无法通信，直接 restart
 #     （续期闪断 1-2s 可接受）；sing-box 同样用 restart。
 # =============================================================================
-set -u
-
-# caddy：因 admin off 用 restart
-if [ -f /etc/caddy/Caddyfile ]; then
-  systemctl restart caddy 2>/dev/null || true
+set -uo pipefail
+rc=0
+for svc in caddy sing-box; do
+  case "$svc" in caddy) config=/etc/caddy/Caddyfile;; *) config=/etc/sing-box/config.json;; esac
+  if [ -f "$config" ] && systemctl is-active --quiet "$svc"; then
+    if ! systemctl restart "$svc" || ! systemctl is-active --quiet "$svc"; then
+      printf '证书重载失败: %s\n' "$svc" >&2
+      rc=1
+    fi
+  fi
+done
+[ "$rc" = 0 ] || exit "$rc"
+# 面板可自行安排重启；cron 调用时交给独立任务，避免中断当前签发进程。
+if [ "${ANSGO_SKIP_PANEL_RESTART:-0}" != 1 ] && systemctl is-active --quiet ansgo-panel; then
+  command -v systemd-run >/dev/null || { echo '缺少 systemd-run，无法安全重启面板' >&2; exit 1; }
+  # acme.sh reloadcmd 可能在签发子进程中执行；用独立 transient unit 延迟重启，避免自杀。
+  systemd-run --quiet --collect --unit="ansgo-cert-panel-reload-$(date +%s)-$$" --on-active=3s \
+    /bin/systemctl restart ansgo-panel || exit 1
 fi
-
-# sing-box：restart（含 ss + anytls）
-if [ -f /etc/sing-box/config.json ]; then
-  systemctl restart sing-box 2>/dev/null || true
-fi
-
-# ansgo-panel：仅在已安装时重启
-if [ -f /etc/systemd/system/ansgo-panel.service ]; then
-  systemctl restart ansgo-panel 2>/dev/null || true
-fi
-
 exit 0

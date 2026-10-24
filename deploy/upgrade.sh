@@ -1,786 +1,497 @@
 #!/usr/bin/env bash
-# =============================================================================
-# ANS-GO 一键升级脚本 (upgrade.sh)   v1.5.37
-#
-# 把任意已部署旧版本的 ANS-GO 服务器升级到当前版本（裸金属 / Docker 自动识别）。
-# 幂等可重复执行，每次升级自动备份，SOCKS5 默认不启用（符合「面板内按需装服务」架构）。
-#
-# 用法：
-#   curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh | bash
-#   bash upgrade.sh [--docker | --metal] [--ver v1.5.25] [--yes]
-#
-# 设计要点（与 install.sh / ansgo-admin 保持一致）：
-#   - VER 与 install.sh 顶部硬编码一致，发新版只需改这一行 + commit
-#   - 复用 install.sh 的 bootstrap（解决 curl|bash 的 SIGPIPE/进程替换卡死）
-#   - panel 二进制无 -version flag（main.go 仅 -setpass），用 md5 对比判断是否真更新，
-#     启动后用 journalctl 日志行 "ansgo-panel v1.5.34 监听..." 验证版本
-#   - 裸金属 panel 替换走 .new→md5→.bak→mv→restart 安全流程（AGENTS.md §9 铁律）
-#   - 备份目录命名 /etc/ansgo-backup-upgrade-{TS}，遵循 ansgo-admin 约定
-# =============================================================================
-# ---- bootstrap：把脚本完整落地后再执行（解决 curl|bash 的两个问题，移植自 install.sh） ----
-# 问题1 SIGPIPE：curl ... | bash 下脚本中途 exit 让 bash 提前结束 → 管道读端关闭 →
-#   curl 写剩余字节收到 SIGPIPE → 报 (23)。
-# 问题2 进程替换卡死：bash <(curl ...) 下 fd0 是用户终端，误用 cat（无参数）会吃终端输入。
-# 修复：检测管道/进程替换运行 → 落地临时文件 → exec 重跑。
+# ANS-GO v1.6.0：同版本资产先校验，再切换；失败恢复整套备份。
 _ansi_self="${BASH_SOURCE[0]:-}"
 case "$_ansi_self" in
-  "" | /dev/fd/* | /proc/self/fd/*)
-    _ansi_tmp="$(mktemp 2>/dev/null || mktemp -t ansgo-upgrade)"
+  ''|/dev/fd/*|/proc/self/fd/*)
+    _ansi_dir=$(mktemp -d) || exit 1
     if [ -n "$_ansi_self" ] && [ -e "$_ansi_self" ]; then
-      cat "$_ansi_self" > "$_ansi_tmp" 2>/dev/null || cp "$_ansi_self" "$_ansi_tmp" 2>/dev/null
-    else
-      cat > "$_ansi_tmp" 2>/dev/null
-    fi
-    if [ -s "$_ansi_tmp" ]; then
-      chmod +rx "$_ansi_tmp" 2>/dev/null
-      export _ANSGO_UPGRADE_BOOTSTRAP_TMP="$_ansi_tmp"
-      exec bash "$_ansi_tmp" "$@"
-    fi
-    rm -f "$_ansi_tmp" 2>/dev/null
-    ;;
+      cat "$_ansi_self" > "$_ansi_dir/upgrade.sh"
+    else cat > "$_ansi_dir/upgrade.sh"; fi
+    export _ANSGO_UPGRADE_BOOTSTRAP_DIR="$_ansi_dir"
+    exec bash "$_ansi_dir/upgrade.sh" "$@";;
 esac
-unset _ansi_self _ansi_tmp
-# ---- bootstrap end ----
-
-set -uo pipefail
-
-if [ -n "${_ANSGO_UPGRADE_BOOTSTRAP_TMP:-}" ] && [ -f "$_ANSGO_UPGRADE_BOOTSTRAP_TMP" ]; then
-  trap 'rm -f "$_ANSGO_UPGRADE_BOOTSTRAP_TMP" 2>/dev/null' EXIT
-fi
-
-# ---- 版本号与资源源（与 install.sh 顶部一致）----
-REPO="6667084/ANS-GO"
-RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
-REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.37"         # 升级目标版本（发新版只改这一行）
-
-# 架构映射（uname -m -> release 二进制后缀）
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64)        AARCH=amd64 ;;
-  aarch64|arm64) AARCH=arm64 ;;
-  *)             AARCH=amd64 ;;
-esac
-
-# ---- 固定路径（与 install.sh / ansgo-admin 一致）----
-METAL_CONF="/etc/ansgo/panel.json"
-METAL_SECRETS="/etc/ansgo/secrets.env"
-METAL_PANEL_BIN="/usr/local/bin/ansgo-panel"
-METAL_GENCONF="/usr/local/bin/ansgo-genconf"
-METAL_ADMIN="/usr/local/bin/ansgo-admin"
-DOCKER_DIR="/etc/ansgo-docker"
-DOCKER_COMPOSE_FILE="${DOCKER_DIR}/docker-compose.yml"
-BACKUP_ROOT="/etc"
-
-# ---- 参数 ----
-FORCE_MODE=""     # "" | docker | metal
-ASSUME_YES=0
-
-# ---- 颜色/日志（移植自 install.sh）----
-if [ -t 1 ]; then C_G='\033[32m';C_Y='\033[33m';C_R='\033[31m';C_B='\033[36m';C_0='\033[0m'; else C_G='';C_Y='';C_R='';C_B='';C_0=''; fi
-log(){  printf "${C_G}[*]${C_0} %s\n" "$*"; }
-inf(){  printf "${C_B}[i]${C_0} %s\n" "$*"; }
-warn(){ printf "${C_Y}[!]${C_0} %s\n" "$*" >&2; }
-err(){  printf "${C_R}[X]${C_0} %s\n" "$*" >&2; }
-ok(){   printf "${C_G}[✓]${C_0} %s\n" "$*"; }
-hr(){   printf "\n${C_B}═══ %s ═══${C_0}\n" "$*"; }
-
-readtty(){
-  local line=""
-  if [ -c /dev/tty ]; then
-    line=$(read -r _LINE </dev/tty 2>/dev/null && printf '%s' "$_LINE") || line=""
-  fi
-  printf '%s' "$line"
-}
-
-# dl：下载 URL 到 DEST。curl 优先，wget 兜底。
-#   - 不用 -C -（断点续传）：对 raw.githubusercontent 的小文本脚本会触发 416
-#     （Range not satisfiable），且重试时残留的部分文件会再次 416 形成死循环。
-#   - 每次重试前 rm -f 清掉残留，确保全新下载。
-#   - --retry 3 + --retry-delay 2 让 curl 自己处理瞬时网络抖动。
-dl(){ # URL DEST
-  local url="$1" dest="$2" i
-  for i in 1 2 3; do
-    rm -f "$dest"
-    if command -v curl >/dev/null; then
-      curl -fsSL --retry 3 --retry-delay 2 "$url" -o "$dest" && return 0
-    else
-      wget -qO "$dest" "$url" && return 0
-    fi
-    [ "$i" -lt 3 ] && { warn "下载第 ${i} 次失败，重试…（$url）"; sleep 2; }
-  done
-  return 1
-}
-# dl_verified：下载并校验大小（防止 GFW/CDN 截断导致 0 字节或残缺文件覆盖好二进制）。
-# 参数：URL DEST MIN_SIZE（字节，下载后文件必须 >= 该大小才算完整）。
-# 用于 release 大二进制（panel）；小文本脚本（genconf/admin）直接用 dl。
-dl_verified(){ # URL DEST MIN_SIZE
-  local url="$1" dest="$2" min_sz="${3:-1048576}" i sz
-  for i in 1 2 3; do
-    if dl "$url" "$dest"; then
-      # 校验：文件存在且大小 >= min_sz（二进制至少几 MB；空文件/截断文件会被挡掉）
-      if [ -f "$dest" ]; then
-        sz=$(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest" 2>/dev/null || echo 0)
-        if [ "${sz:-0}" -ge "$min_sz" ] 2>/dev/null; then
-          return 0
-        fi
-        warn "下载文件不完整（$sz 字节 < 最小 $min_sz），第 ${i} 次重试…"
-      else
-        warn "下载后文件不存在，第 ${i} 次重试…"
-      fi
-    else
-      warn "下载失败，第 ${i} 次重试…（$url）"
-    fi
-    rm -f "$dest"
-    [ "$i" -lt 3 ] && sleep 2
-  done
-  return 1
-}
-dl_or_exit(){ dl "$1" "$2" || { err "下载失败（3 次重试后仍无效）: $1"; exit 3; }; }
-dl_verified_or_exit(){ dl_verified "$1" "$2" "${MIN_ASSET_SIZE:-1048576}" || { err "下载失败或文件不完整（3 次重试后仍无效）: $1"; exit 3; }; }
-
-usage(){ cat <<EOF
-用法: bash upgrade.sh [选项]
-  把已部署的 ANS-GO 服务器升级到 ${VER}（裸金属 / Docker 自动识别）。
-
-选项:
-  --docker        强制走 Docker 升级路径（仅拉镜像重建容器）
-  --metal         强制走裸金属升级路径（更新 3 组件 + 补配置字段）
-  --ver TAG       覆盖目标版本号（默认 ${VER}，一般不需要）
-  --yes, -y       跳过升级前确认
-  --help, -h      显示本帮助
-
-示例:
-  curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh | bash
-  bash upgrade.sh --metal --yes
-  bash upgrade.sh --docker --yes
-
-升级内容（${VER}）:
-  - 【v1.5.37】连接 IP 未配置时，面板启动后自动查询公网 IPv4 并保存；已有值保留。
-    多出口/NAT 的连接入口可能不同，请手动指定连接 IP。安装新增 --server-ip / --panel-title。
-    AnyTLS / 落地 AnyTLS / SS / SOCKS5 URI 优先使用 IP，TLS SNI 保留域名；NaiveProxy 保留域名。
-    ACME 界面精简为 API Key（旧 OAuth 配置继续兼容），宿主证书同步脚本仅 Docker 手动模式显示。
-  - 【v1.5.36】① Docker：为 docker-compose.yml 幂等补充容器资源约束（mem_limit /
-    memswap_limit / pids_limit / 日志 json-file 10m×3），防泄漏或失控拖垮小内存宿主
-    （此前无限制，长跑内存耗尽整卡死只能强制重启）；按宿主内存自动算限制值
-    （≤1G 宿主取 70%），已有手动限制则保留不覆盖。② install.sh：Docker 部署
-    --docker-mem 参数 + 同样的自动约束；caddy 二进制下载加 v1.5.16 vendored
-    兜底源（v1.5.17~35 release 漏传 caddy 资产曾致全新裸金属部署必败）；
-    acme 签发前清除旧 /etc/ansgo-cert.status（防重部署误读上次结果）。
-  - 【v1.5.34】upgrade.sh 升级说明文案同步到 v1.5.33+；裸金属升级后显式回显面板版本号
-    （从 journalctl 日志行提取 "ansgo-panel v1.5.x 监听..." 并比对目标版本，不匹配则告警，
-    让用户明确知道升级是否真的生效）。
-  - 【v1.5.33·健康检测协议级诊断】① 主 Shadowsocks 检测新增服务器时间/UTC/时区/NTP 状态展示
-    （Docker 标记为 host 共享宿主时间，避免误报；裸金属明确未同步时提示先同步系统时间）。
-    ② 落地服务远端 Shadowsocks 检测从「只测 TCP」升级为「method/password 校验 + 临时 sing-box
-    协议探测」，失败时区分密钥格式、TCP 不通、认证/加密失败、SS2022 时间戳失败、超时/出口异常。
-    ③ 临时探测配置使用 root-only 私有目录、0600 权限、过期清理；探测日志脱敏 password。
-  - 【v1.5.32·节点命名 + Docker 手动证书同步】① 面板设置「网页标题」改名「节点信息」，
-    浏览器标题自动追加 _ANS。② 节点 URI #fragment 改为 <节点信息>-<服务简称>（AT/NV/SS/SK）。
-    ③ Docker 手动证书改为填写宿主机真实路径 + 固定同步目录 /etc/ansgo-docker/manual-certs。
-  - v1.5.31：规范化 SS_KEY 为 sing-box 接受的标准 base64
-  - v1.5.30：修复旧部署非法 SS_KEY 阻断保存/修复
-  - v1.5.29：全局端口冲突检测 + 落地远端出口诊断
-  - v1.5.28：落地 AnyTLS 密码保存 + sing-box config 预检回滚
-  - v1.5.27：证书管理页补全 Dynu 凭证入口 + 立即签发证书
-  - v1.5.26：多落地服务（可创建多个 anytls 落地 + 远端 SS/SOCKS5）
-  - v1.5.25：NaiveProxy 代理不通根治（Caddyfile route{} 指令排序）
-  - v1.5.24：NaiveProxy 凭证改同步验证 active + 🔧 修复按钮
-  - v1.5.23：NaiveProxy 凭证含空格/{} 破坏 Caddyfile 三层防御
-  - v1.5.22：面板设置保存无反应 + 侧栏版本号
-
-注意:
-  - SOCKS5 升级后默认不启用（svc_socks_enabled=false），需登录面板「服务管理」页
-    点「安装」或 SSH 执行 ansgo-admin regen socks 才会启用。
-  - 升级前自动备份到 /etc/ansgo-backup-upgrade-{时间戳}/。
+set -Eeuo pipefail
+umask 077
+REPO=6667084/ANS-GO
+VER="v1.6.0"
+MODE='' YES=0 AUTO=0 STAGE='' BACKUP='' MUTATED=0 DONE=0 DOCKER_PAUSED=0 METAL_PAUSED=0
+DOCKER_DIR=/etc/ansgo-docker
+COMPOSE_FILE="$DOCKER_DIR/docker-compose.yml"
+RESULT=/var/lib/ansgo/upgrade.result
+LOG=/var/log/ansgo/upgrade.log
+usage(){ cat <<'EOF'
+用法: ansgo-upgrade [--metal|--docker] [--ver vX.Y.Z] [--yes] [--auto]
+  --auto  查询 GitHub 最新稳定 release，无更新时退出 0
+  --ver   从对应 tag 拉取脚本与 release 资产
+  --metal 更新全部受管组件、按活跃服务重启并验证；失败自动恢复整套备份
+  --docker 拉取明确版本镜像、迁移旧落地配置、备份实际卷并重建验证
+日志: /var/log/ansgo/upgrade.log  结果: /var/lib/ansgo/upgrade.result
 EOF
 }
-
-# ---- 参数解析 ----
 while [ $# -gt 0 ]; do
   case "$1" in
-    --docker)
-      [ "$FORCE_MODE" = metal ] && { err "--docker 与 --metal 互斥"; exit 1; }
-      FORCE_MODE="docker"; shift;;
-    --metal)
-      [ "$FORCE_MODE" = docker ] && { err "--docker 与 --metal 互斥"; exit 1; }
-      FORCE_MODE="metal"; shift;;
-    --ver)      VER="${2:-}"; [ -z "$VER" ] && { err "--ver 需要参数"; exit 1; }; shift 2;;
-    --yes|-y)   ASSUME_YES=1; shift;;
-    --help|-h)  usage; exit 0;;
-    *) err "未知参数: $1（用 --help 查看用法）"; exit 1;;
+    --metal|--docker)
+      requested="${1#--}"
+      [ -z "$MODE" ] || [ "$MODE" = "$requested" ] || { echo '部署模式互斥' >&2; exit 1; }
+      MODE="$requested"; shift;;
+    --ver) VER="${2:?--ver 缺少版本}"; shift 2;;
+    --yes|-y) YES=1; shift;;
+    --auto) AUTO=1; YES=1; shift;;
+    --help|-h) usage; exit 0;;
+    *) usage >&2; exit 1;;
   esac
 done
-
-# 去掉 VER 前缀 v 用于日志展示
-VER_NUM="${VER#v}"
-
-# ---- 形态检测（复用 install.sh:343-346 双探针）----
-detect_mode(){
-  local has_docker=0 has_metal=0
-  [ -f "$DOCKER_COMPOSE_FILE" ] && has_docker=1
-  { [ -f "$METAL_CONF" ] || [ -x "$METAL_PANEL_BIN" ] \
-    || systemctl list-unit-files 2>/dev/null | grep -qE 'ansgo-panel|sing-box|caddy'; } && has_metal=1
-
-  if [ -n "$FORCE_MODE" ]; then
-    echo "$FORCE_MODE"
-  elif [ "$has_docker" = 1 ] && [ "$has_metal" = 1 ]; then
-    echo "ambiguous"
-  elif [ "$has_docker" = 1 ]; then
-    echo "docker"
-  elif [ "$has_metal" = 1 ]; then
-    echo "metal"
-  else
-    echo "none"
-  fi
-}
-
-# 检测 compose 命令（v2 子命令优先，v1 独立二进制兜底；移植自 install.sh:568-577）
-detect_compose(){
-  if docker compose version >/dev/null 2>&1; then echo "docker compose"
-  elif command -v docker-compose >/dev/null 2>&1; then echo "docker-compose"
-  else echo ""; fi
-}
-
-# 磁盘空间检查（MB），不足给出警告（升级需要拉取 panel 二进制约 15MB + 解压空间）
-check_disk(){
-  local avail_mb
-  avail_mb=$(df -m / 2>/dev/null | awk 'NR==2{print $4}')
-  if [ -n "${avail_mb:-}" ] && [ "$avail_mb" -lt 200 ] 2>/dev/null; then
-    warn "磁盘可用空间仅 ${avail_mb}MB（<200MB），升级可能失败。建议先清理。"
-  fi
-}
-
-# =============================================================================
-# 裸金属升级
-# =============================================================================
-upgrade_metal(){
-  hr "裸金属升级 → ${VER}"
-
-  # 前置检查：必须 root
-  [ "$(id -u)" = 0 ] || { err "裸金属升级需要 root 权限"; exit 1; }
-  command -v systemctl >/dev/null || { err "未找到 systemctl（裸金属升级仅支持 systemd 系统）"; exit 1; }
-  command -v python3 >/dev/null || { err "未找到 python3（补 panel.json 字段需要）"; exit 1; }
-
-  # 备份
-  hr "1/7 备份当前状态"
-  local TS BK
-  TS=$(date +%Y%m%d-%H%M%S)
-  BK="${BACKUP_ROOT}/ansgo-backup-upgrade-${TS}"
-  mkdir -p "$BK"
-  for f in "$METAL_PANEL_BIN" "$METAL_GENCONF" "$METAL_ADMIN" "$METAL_CONF" "$METAL_SECRETS" \
-           /etc/sing-box/config.json /etc/caddy/Caddyfile; do
-    if [ -f "$f" ]; then
-      cp -a "$f" "$BK/$(echo "$f" | tr '/' '_')"
-      log "  已备份 $(echo "$f" | tr '/' '_')"
-    fi
-  done
-  ok "备份目录: $BK"
-
-  # 记录旧 panel md5（用于判断是否真更新）
-  local old_panel_md5=""
-  [ -f "$METAL_PANEL_BIN" ] && old_panel_md5=$(md5sum "$METAL_PANEL_BIN" 2>/dev/null | awk '{print $1}')
-
-  # 更新 genconf + admin 脚本（raw 拉取，直接覆盖——下次调用即生效）
-  hr "2/7 更新 ansgo-genconf + ansgo-admin 脚本"
-  log "从 ${RAW}/ 下载最新脚本"
-  dl_or_exit "$RAW/ansgo-genconf" "$METAL_GENCONF"
-  dl_or_exit "$RAW/ansgo-admin"   "$METAL_ADMIN"
-  chmod 0755 "$METAL_GENCONF" "$METAL_ADMIN"
-  ok "脚本已更新（genconf: sing-box check 预检回滚 / admin: 保持最新兜底命令）"
-
-  # 更新 panel 二进制（release 拉取，走 .new→md5→.bak→mv→restart 安全流程）
-  hr "3/7 更新 ansgo-panel 二进制"
-  local panel_tmp="/tmp/ansgo-panel-${VER_NUM}.new"
-  log "从 release 下载 ansgo-panel-linux-${AARCH} (${VER})"
-  # 面板二进制约 11MB，最小校验 5MB（挡住 0 字节 / 截断文件覆盖好二进制）
-  MIN_ASSET_SIZE=5242880 dl_verified_or_exit "$REL/$VER/ansgo-panel-linux-${AARCH}" "$panel_tmp"
-  chmod 0755 "$panel_tmp"
-
-  local new_panel_md5
-  new_panel_md5=$(md5sum "$panel_tmp" 2>/dev/null | awk '{print $1}')
-
-  # 校验下载的二进制内嵌版本号 = 目标版本（防 CDN 缓存返回旧版二进制）
-  local dl_ver
-  dl_ver=$(grep -ao "main\.version=[0-9.]*" "$panel_tmp" 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
-  if [ -z "$dl_ver" ]; then
-    # fallback：直接在二进制里找版本字符串
-    dl_ver=$(grep -ao "${VER_NUM}" "$panel_tmp" 2>/dev/null | head -1 || true)
-  fi
-  if [ -n "$dl_ver" ] && [ "$dl_ver" != "$VER_NUM" ]; then
-    err "下载的二进制内嵌版本 ${dl_ver} 与目标 ${VER_NUM} 不符（GitHub CDN 可能返回了缓存旧版）"
-    err "  清除缓存重试：rm -f '$panel_tmp' 后重跑本脚本；或手动从浏览器下载 release 资产后 scp 上传。"
-    rm -f "$panel_tmp"
-    exit 3
-  fi
-
-  if [ -n "$old_panel_md5" ] && [ "$old_panel_md5" = "$new_panel_md5" ]; then
-    ok "panel 二进制 md5 与当前一致（${new_panel_md5:0:12}...），跳过替换"
-    rm -f "$panel_tmp"
-  else
-    # 安全替换：先下载校验过的 .new → 备份旧为 .bak → mv 替换
-    # panel 无 -version flag，靠 md5 变化 + 启动日志验证
-    if [ -f "$METAL_PANEL_BIN" ]; then
-      cp -a "$METAL_PANEL_BIN" "${METAL_PANEL_BIN}.bak"
-      log "  旧二进制备份为 ${METAL_PANEL_BIN}.bak（md5 ${old_panel_md5:0:12}...）"
-    fi
-    mv "$panel_tmp" "$METAL_PANEL_BIN"
-    chmod 0755 "$METAL_PANEL_BIN"
-    ok "panel 二进制已替换（新 md5 ${new_panel_md5:0:12}...）"
-  fi
-
-  # 补 panel.json 缺失字段（socks_port / svc_socks_enabled / panel_title）+ v1.5.26 落地服务迁移
-  hr "4/7 补 panel.json 缺失字段 + 多落地服务迁移（v1.5.26）"
-  if [ ! -f "$METAL_CONF" ]; then
-    warn "$METAL_CONF 不存在，跳过字段补全（panel 启动后会用默认值创建）"
-  else
-    # 迁移前备份 panel.json（原子写，失败可回滚）
-    cp -a "$METAL_CONF" "$METAL_CONF.bak-pre-v1.5.26" 2>/dev/null || true
-    python3 - "$METAL_CONF" <<'PY' || warn "python3 迁移失败（检查 panel.json 是否完整，备份在 *.bak-pre-v1.5.26）"
-import json, random, sys
-p = sys.argv[1]
-with open(p) as f:
-    d = json.load(f)
-changed = []
-
-def rand_port(d):
-    used = set()
-    # v1.5.26: 端口来源包括 landings 数组里的 port（替代旧的 anytls2_port）
-    for k in ("ss_port","anytls_port","naive_port","panel_port","socks_port"):
-        v = d.get(k)
-        if isinstance(v, int) and v > 0:
-            used.add(v)
-    for L in d.get("landings", []):
-        v = L.get("port")
-        if isinstance(v, int) and v > 0:
-            used.add(v)
-    used |= {80, 443, 25822}
-    for _ in range(1000):
-        r = random.randint(10000, 65535)
-        if r not in used:
-            return r
-    return random.randint(10000, 65535)
-
-if not d.get("socks_port"):
-    d["socks_port"] = rand_port(d)
-    changed.append(f"socks_port={d['socks_port']}（随机生成，可在面板改）")
-if "svc_socks_enabled" not in d:
-    d["svc_socks_enabled"] = "false"   # 默认不启用（按需在面板开启）
-    changed.append("svc_socks_enabled=false（SOCKS5 默认不启用）")
-if not d.get("panel_title"):
-    d["panel_title"] = "ANS-GO 管理面板"
-    changed.append("panel_title=ANS-GO 管理面板（可在面板设置页改）")
-
-# === v1.5.26: 多落地服务迁移（幂等：仅当 landings 不存在时执行）===
-# 旧的 group2_enabled/anytls2_port/naive2_port/ss_landing_* 扁平字段 -> landings[0]
-# 迁移后这些旧字段从 panel.json 移除（Go Config 不再读取它们）。
-if "landings" not in d:
-    old_g2 = str(d.get("group2_enabled", "false")).lower() == "true"
-    old_port = d.get("anytls2_port", 0) or 0
-    try:
-        old_port = int(old_port)
-    except (ValueError, TypeError):
-        old_port = 0
-    old_land_en = str(d.get("ss_landing_enabled", "false")).lower() == "true"
-    L0 = {
-        "id": "1",
-        "name": "默认落地",
-        "enabled": old_g2,
-        "port": old_port,
-        "remote_enabled": old_land_en,
-        "remote_type": "ss",
-        "remote_host": d.get("ss_landing_host", "") or "",
-        "remote_port": (lambda x: int(x) if x else 0)(d.get("ss_landing_port", 0)),
-        "remote_method": d.get("ss_landing_method", "2022-blake3-aes-128-gcm") or "2022-blake3-aes-128-gcm",
-        "remote_password": d.get("ss_landing_password", "") or "",
-        "remote_user": "",
-    }
-    d["landings"] = [L0]
-    changed.append(f"landings=[{{id:1,name:'默认落地',enabled:{old_g2},port:{old_port}}}]（从旧 group2/ss_landing 字段迁移）")
-# 移除旧扁平字段（landings 已存在后这些字段无用，留着会让旧版面板困惑）
-for k in ("group2_enabled","anytls2_port","naive2_port",
-          "ss_landing_enabled","ss_landing_host","ss_landing_port",
-          "ss_landing_method","ss_landing_password"):
-    if k in d:
-        d.pop(k)
-
-# === v1.5.27: 证书管理页 Dynu 凭证字段（幂等：字段不存在才补空串）===
-# 这些字段让「首次 manual 部署后切 acme」能在面板填 Dynu 凭证并签发。
-# acme.sh 续期 cron 读 /root/.acme.sh/account.conf，凭证由面板写入。
-# 已存在的部署通常 account.conf 已含凭证（首次 acme 签发时持久化），此处只补 panel.json 字段占位。
-for k in ("dynu_api_key","dynu_client_id","dynu_secret","acme_email"):
-    if k not in d:
-        d[k] = ""
-        changed.append(f"{k}=''（v1.5.27 新增证书凭证字段，可在面板证书页填写）")
-
-# === v1.5.32: Docker 手动证书宿主源路径字段（幂等：字段不存在才补空串）===
-# 裸金属部署这两字段保持空（运行路径 = cert_fullchain/cert_privkey 本身）。
-# Docker 部署由 entrypoint 从 env 迁移，或由面板证书页填写后生成同步脚本。
-for k in ("cert_host_fullchain","cert_host_privkey"):
-    if k not in d:
-        d[k] = ""
-
-# 原子写（tmp + rename）
-import os
-tmp = p + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(d, f, ensure_ascii=False, indent=2)
-os.replace(tmp, p)
-if changed:
-    print("  已补/迁移字段:")
-    for c in changed:
-        print(f"    + {c}")
-else:
-    print("  panel.json 字段已齐全，无需补全")
+[[ "$VER" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '版本须为 vX.Y.Z' >&2; exit 1; }
+[ "$(id -u)" = 0 ] || { echo '升级需要 root' >&2; exit 1; }
+case "$(uname -m)" in x86_64) AARCH=amd64;; aarch64|arm64) AARCH=arm64;; *) echo '架构不支持' >&2; exit 1;; esac
+command -v python3 >/dev/null
+mkdir -p /var/log/ansgo /var/lib/ansgo /usr/local/bin
+chmod 700 /var/log/ansgo /var/lib/ansgo
+# 跨 CLI/timer/API 防止并行升级。锁 fd 不能传给重启后的服务。
+exec 9>/var/lib/ansgo/upgrade.lock
+flock -n 9 || { echo '已有升级正在执行' >&2; exit 1; }
+# 先裁剪再打开 append fd；后续阶段及每次下载前也执行裁剪。
+trim_log(){
+  python3 - "$LOG" <<'PY'
+import os, sys
+p=sys.argv[1]
+if os.path.exists(p) and os.path.getsize(p)>1048576:
+    with open(p,'r+b') as f:
+        f.seek(-262144,2); data=f.read(); f.seek(0); f.write(data); f.truncate()
 PY
+}
+trim_log
+if [ "$AUTO" = 1 ]; then
+  exec >> "$LOG" 2>&1
+  renice -n 10 -p $$ >/dev/null
+  command -v ionice >/dev/null && ionice -c3 -p $$ || true
+else
+  exec > >(tee -a "$LOG") 2>&1
+fi
+say(){ trim_log; printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
+write_result(){ printf '%s\n' "$1" > "$RESULT.tmp"; mv "$RESULT.tmp" "$RESULT"; }
+finish(){
+  local rc=$?
+  trap - EXIT INT TERM
+  set +e
+  if [ "$rc" -ne 0 ] && [ "$MUTATED" = 1 ]; then
+    say '升级失败，自动恢复备份'
+    if [ "$MODE" = metal ]; then
+      systemctl stop ansgo-panel caddy sing-box
+      ansgo_restore "$BACKUP"
+      restore_rc=$?
+      systemctl daemon-reload
+      for svc in caddy sing-box ansgo-panel; do
+        if printf "%s\n" "${OLD_ENABLED[@]:-}" | grep -qx "$svc"; then systemctl enable "$svc" || restore_rc=1; else systemctl disable "$svc" || restore_rc=1; fi
+        if printf "%s\n" "${OLD_ACTIVE[@]:-}" | grep -qx "$svc"; then systemctl restart "$svc" && systemctl is-active --quiet "$svc" || restore_rc=1; fi
+      done
+      [ "$restore_rc" = 0 ] || say "自动回滚未完全成功，请使用备份恢复: $BACKUP"
+    else
+      docker_rollback || say "Docker 回滚失败，请用备份恢复: $BACKUP"
+    fi
   fi
-
-  # v1.5.26: secrets.env 凭证迁移（ANYTLS2_* -> LANDING_1_*，幂等）
-  hr "5/7 补 secrets.env SOCKS5 凭证 + 落地服务凭证迁移"
-  if [ ! -f "$METAL_SECRETS" ]; then
-    warn "$METAL_SECRETS 不存在，跳过凭证补全"
+  if [ "$rc" -ne 0 ] && [ "$DOCKER_PAUSED" = 1 ] && [ "$MUTATED" = 0 ]; then
+    docker exec "$CID" systemctl start ansgo-panel cron || true
+  fi
+  if [ "$rc" -ne 0 ] && [ "$METAL_PAUSED" = 1 ] && [ "$MUTATED" = 0 ]; then
+    if printf '%s\n' "${OLD_ACTIVE[@]:-}" | grep -qx ansgo-panel; then
+      systemctl start ansgo-panel || true
+    fi
+  fi
+  if [ "$rc" -eq 0 ] && [ "$DONE" = 1 ]; then
+    trim_log
+    write_result success
+    say '升级完成；浏览器请硬刷新（Ctrl+Shift+R / Cmd+Shift+R）'
+  elif [ "$rc" -ne 0 ]; then
+    write_result failed
+    say "升级失败（退出码 $rc），日志: $LOG；备份: ${BACKUP:-尚未切换组件}"
+  fi
+  [ -z "$STAGE" ] || rm -rf "$STAGE"
+  [ -z "${_ANSGO_UPGRADE_BOOTSTRAP_DIR:-}" ] || rm -rf "$_ANSGO_UPGRADE_BOOTSTRAP_DIR"
+  exit "$rc"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# 自动检测不可把混合部署猜成一种模式。
+if [ -z "$MODE" ]; then
+  if [ -f "$COMPOSE_FILE" ] && [ -f /etc/ansgo/panel.json ]; then
+    say '同时检测到裸金属和 Docker，请指定 --metal/--docker'; exit 1
+  elif [ -f "$COMPOSE_FILE" ]; then MODE=docker
+  elif [ -f /etc/ansgo/panel.json ]; then MODE=metal
+  else say '未检测到已安装的 ANS-GO'; exit 1; fi
+fi
+COMPOSE=()
+if [ "$MODE" = docker ]; then
+  [ "$AUTO" = 0 ] || { say 'Docker 自动升级请在宿主安排，容器内 timer 不支持'; exit 1; }
+  if docker compose version >/dev/null 2>&1; then COMPOSE=(docker compose)
+  elif command -v docker-compose >/dev/null; then COMPOSE=(docker-compose)
+  else say '未找到 compose'; exit 1; fi
+fi
+current_version(){
+  if [ "$MODE" = docker ]; then
+    docker exec "$CID" cat /usr/local/share/ansgo-version
   else
-    local added=0
-    if ! grep -q '^SOCKS_USER=' "$METAL_SECRETS"; then
-      echo "SOCKS_USER=$(openssl rand -hex 6)" >> "$METAL_SECRETS"
-      log "  + SOCKS_USER（随机生成）"; added=1
-    fi
-    if ! grep -q '^SOCKS_PASS=' "$METAL_SECRETS"; then
-      echo "SOCKS_PASS=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c20)" >> "$METAL_SECRETS"
-      log "  + SOCKS_PASS（随机生成）"; added=1
-    fi
-    # v1.5.26: ANYTLS2_PASS/UUID -> LANDING_1_PASS/UUID（仅当 LANDING_1_* 不存在时）
-    if ! grep -q '^LANDING_1_PASS=' "$METAL_SECRETS"; then
-      if grep -q '^ANYTLS2_PASS=' "$METAL_SECRETS"; then
-        sed -i 's/^ANYTLS2_PASS=/LANDING_1_PASS=/; s/^ANYTLS2_UUID=/LANDING_1_UUID=/' "$METAL_SECRETS"
-        log "  ~ ANYTLS2_PASS/UUID -> LANDING_1_PASS/UUID（v1.5.26 凭证迁移）"; added=1
-      fi
-    fi
-    # v1.5.31: 修复/规范化旧部署遗留的非标准 SS2022 密钥。
-    # sing-box 的 SS2022 password 只接受标准 base64（带 padding）；raw/url-safe/完全非法
-    # SS_KEY 都会让任何保存/修复卡在 decode psk。可解码则规范化，不可解码才重置。
-    python3 - "$METAL_CONF" "$METAL_SECRETS" <<'PY'
-import base64, json, os, sys
-conf,secrets=sys.argv[1:3]
-try:
-    cfg=json.load(open(conf))
-except Exception:
-    cfg={}
-if str(cfg.get('svc_ss_enabled','true')).lower() in ('true','1') and os.path.exists(secrets):
-    lines=open(secrets).read().splitlines(); data={}
-    for line in lines:
-        if '=' in line and not line.lstrip().startswith('#'):
-            k,v=line.split('=',1); data[k]=v.strip().strip('"')
-    method=data.get('SS_METHOD') or cfg.get('ss_method') or '2022-blake3-aes-128-gcm'
-    want=16 if method.startswith('2022-blake3-aes-128') else (32 if method.startswith('2022-blake3-aes-256') else 0)
-    def normalize(k):
-        if want <= 0: return k, False
-        for alt in (k.strip(), k.strip()+'=', k.strip()+'==', k.strip()+'==='):
-            for cand in (alt, alt.replace('-','+').replace('_','/')):
-                try:
-                    raw=base64.b64decode(cand.encode(), validate=True)
-                    if len(raw)==want:
-                        return base64.b64encode(raw).decode(), True
-                    return '', False
-                except Exception:
-                    pass
-        return '', False
-    new, ok = normalize(data.get('SS_KEY',''))
-    changed_msg = '规范化'
-    if want and not ok:
-        new=base64.b64encode(os.urandom(want)).decode(); changed_msg='非法，已自动重置'
-    if want and (not ok or new != data.get('SS_KEY','')):
-        out=[]; seen=False
-        for line in lines:
-            if line.startswith('SS_KEY='):
-                out.append('SS_KEY='+new); seen=True
-            else:
-                out.append(line)
-        if not seen: out.append('SS_KEY='+new)
-        open(secrets,'w').write('\n'.join(out).rstrip('\n')+'\n')
-        os.chmod(secrets,0o600)
-        print('  ~ SS_KEY '+changed_msg+'为 sing-box 接受的标准 base64（SS 客户端需重新复制节点信息）')
+    local port path current invocation conf="${1:-/etc/ansgo/panel.json}"
+    read -r port path < <(python3 - "$conf" <<'PY'
+import json,sys
+c=json.load(open(sys.argv[1]));print(c["panel_port"],c["url_path"])
 PY
-    chmod 600 "$METAL_SECRETS"
-    [ "$added" = 0 ] && ok "secrets.env 凭证已齐全，无需补全" || ok "secrets.env 凭证已补全/迁移"
+)
+    current=$(curl --noproxy '*' -kfsS --max-time 5 "https://127.0.0.1:$port${path}api/auth" |
+      python3 -c 'import json,re,sys;v=json.load(sys.stdin)["version"];assert re.fullmatch(r"v?\d+\.\d+\.\d+",v);print("v"+v.lstrip("v"))') || current=''
+    if [ -n "$current" ]; then printf '%s\n' "$current"; return; fi
+    # 旧版 Go 的 trimpath 构建可能不保留 -X 的 buildinfo；只读本次 invocation 的启动行。
+    invocation=$(systemctl show ansgo-panel -p InvocationID --value)
+    if [ -n "$invocation" ]; then
+      current=$(journalctl "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager -o cat |
+        sed -n 's/.*ansgo-panel \(v[0-9][0-9.]*\) .*/\1/p' | tail -1)
+    fi
+    if [[ "$current" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then printf '%s\n' "$current"
+    else echo '无法识别当前运行版本，自动升级停止' >&2; return 1; fi
   fi
-
-  # 重启面板加载新二进制 + 新字段
-  hr "6/7 重启 ansgo-panel"
-  systemctl restart ansgo-panel || { err "ansgo-panel 重启失败，检查 journalctl -u ansgo-panel"; exit 1; }
-  ok "ansgo-panel 已重启"
-
-  # 验证
-  hr "7/7 验证"
-  sleep 2
-  local panel_active svc_active
-  panel_active=$(systemctl is-active ansgo-panel 2>/dev/null || echo unknown)
-  if [ "$panel_active" = active ]; then
-    ok "ansgo-panel: active"
-  else
-    err "ansgo-panel: $panel_active（非 active！请检查 journalctl -u ansgo-panel）"
+}
+if [ "$AUTO" = 1 ]; then
+  VER=$(curl --noproxy '*' --connect-timeout 5 --max-time 10 -fsSL \
+    "https://api.github.com/repos/$REPO/releases/latest" |
+    python3 -c 'import json,re,sys; d=json.load(sys.stdin); v=d["tag_name"]; assert not d.get("prerelease") and not d.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+",v); print(v)')
+  CURRENT=$(current_version)
+  if ! python3 - "$CURRENT" "$VER" <<'PY'
+import sys
+v=lambda x:tuple(map(int,x.lstrip('v').split('.')))
+sys.exit(0 if v(sys.argv[2])>v(sys.argv[1]) else 1)
+PY
+  then
+    say "当前 $CURRENT，最新 $VER，无需升级"
+    write_result success
+    exit 0
   fi
-
-  # 版本号验证（panel 无 -version flag，从启动日志读；restart 后面板启动要几秒，轮询）
-  local logged_ver="" vi
-  for vi in $(seq 1 10); do
-    logged_ver=$(journalctl -u ansgo-panel -n 20 --no-pager 2>/dev/null \
-      | grep -oE 'ansgo-panel v[0-9]+\.[0-9]+\.[0-9]+' | tail -1 | grep -oE 'v[0-9.]+$' || echo "")
-    [ -n "$logged_ver" ] && break
+fi
+RAW="https://raw.githubusercontent.com/$REPO/$VER/deploy"
+REL="https://github.com/$REPO/releases/download/$VER"
+if [ "$YES" = 0 ]; then
+  printf '将升级到 %s（%s），升级前自动备份。继续？[y/N] ' "$VER" "$MODE"
+  read -r answer </dev/tty
+  case "$answer" in y|Y) ;; *) say '已取消'; exit 0;; esac
+fi
+rm -f "$RESULT"
+STAGE=$(mktemp -d /usr/local/bin/.ansgo-upgrade.XXXXXX)
+dl(){ trim_log; curl --connect-timeout 10 --max-time 180 --retry 2 -fsSL "$1" -o "$2" && test -s "$2"; }
+# 从指定 tag 加载公共实现；下载失败不改任何已安装组件。
+dl "$RAW/ansgo-limits" "$STAGE/ansgo-limits"
+bash -n "$STAGE/ansgo-limits"
+source "$STAGE/ansgo-limits"
+ansgo_logs_init
+verify_elf(){
+  python3 - "$1" "$AARCH" "${2:-}" <<'PY'
+import re,struct,sys
+p,arch,version=sys.argv[1:]
+with open(p,'rb') as f:
+    h=f.read(20)
+    assert len(h)==20 and h[:5]==b'\x7fELF\x02' and h[5]==1, '不是 ELF64 小端二进制'
+    assert struct.unpack('<H',h[18:20])[0]=={'amd64':62,'arm64':183}[arch], 'ELF 架构错误'
+    if version:
+        f.seek(0); data=f.read()
+        versions=re.findall(rb'main\.version=(\d+\.\d+\.\d+)',data)
+        expected=version.lstrip('v').encode()
+        # trimpath 构建会省略 ldflags；-X 的值仍以 NUL 结尾存放，避免匹配前端历史注释。
+        assert expected in versions or expected+b'\0' in data, 'panel 内嵌版本不匹配'
+PY
+}
+active_services(){
+  python3 - /etc/ansgo/panel.json <<'PY'
+import json,sys
+c=json.load(open(sys.argv[1])); on=lambda k,default='false':str(c.get(k,default)).lower()=='true'
+if on('caddy_enable','true') or on('svc_naive_enabled'): print('caddy')
+if any(on('svc_'+x+'_enabled') for x in ('ss','anytls','socks')) or any(str(x.get('enabled','false')).lower()=='true' for x in c.get('landings',[])): print('sing-box')
+print('ansgo-panel')
+PY
+}
+wait_active(){
+  local svc="$1" i
+  for i in {1..15}; do
+    systemctl is-active --quiet "$svc" && return 0
     sleep 1
   done
-  if [ -n "$logged_ver" ]; then
-    if [ "$logged_ver" = "$VER" ]; then
-      ok "面板版本: ${logged_ver}（目标 ${VER} ✓）"
-    else
-      warn "面板日志版本: ${logged_ver}（目标 ${VER}，可能二进制未随 release 同步或日志未刷新）"
-    fi
-  else
-    warn "未能从日志读取版本号（可稍后 journalctl -u ansgo-panel | grep 'ansgo-panel v' 确认）"
-  fi
-
-  # 其他服务状态（不强制 active，仅提示）
-  for svc in caddy sing-box; do
-    local st; st=$(systemctl is-active "$svc" 2>/dev/null || echo unknown)
-    log "  ${svc}: ${st}"
-  done
-
-  echo
-  hr "升级完成"
-  # 注意：必须用 printf 而非 echo。bash 的 echo 默认不解释 \033 转义，
-  # 会把颜色码原样输出成字面 "\033[36m..."（即"乱码"）。printf 会正确解释。
-  printf '  备份目录 : %b%s%b\n' "$C_B" "$BK" "$C_0"
-  printf '  回滚命令 : %bcp -a "%s/_usr_local_bin_ansgo-panel" %s \&\& systemctl restart ansgo-panel%b\n' "$C_B" "$BK" "$METAL_PANEL_BIN" "$C_0"
-  echo
-  printf '  %bSOCKS5 默认未启用%b。启用方式：\n' "$C_Y" "$C_0"
-  echo "    1. 登录面板 →「服务管理」页 → SOCKS5 卡片 → 点「安装」"
-  echo "    2. 或 SSH 执行: ansgo-admin regen socks（生成/重置凭证，sing-box 自动重载）"
-  echo "    3. 查看连接 URI: ansgo-admin info"
-  echo
-  printf '  %b⚠️ 浏览器需硬刷新才能看到新界面%b（面板前端内嵌在二进制里，升级后必须清缓存）：\n' "$C_Y" "$C_0"
-  echo "    Windows/Linux: Ctrl+Shift+R   |   macOS: Cmd+Shift+R   |   或无痕窗口打开面板"
+  say "$svc 未进入 active"; return 1
 }
-
-# =============================================================================
-# Docker 升级
-# =============================================================================
+verify_panel(){
+  local invocation logged i
+  invocation=$(systemctl show ansgo-panel -p InvocationID --value)
+  [ -n "$invocation" ] || return 1
+  for i in {1..10}; do
+    logged=$(journalctl "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager -o cat -n 30 |
+      sed -n 's/.*ansgo-panel \(v[0-9][0-9.]*\) .*/\1/p' | tail -1)
+    [ "$logged" != "$VER" ] || break
+    sleep 1
+  done
+  [ "$logged" = "$VER" ] || { say "本次启动版本不匹配: $logged / $VER"; return 1; }
+  local port path i
+  read -r port path < <(python3 -c 'import json;c=json.load(open("/etc/ansgo/panel.json")); print(c["panel_port"],c["url_path"])')
+  for i in {1..10}; do
+    curl --noproxy '*' -kfsS --max-time 3 "https://127.0.0.1:$port${path}api/auth" >/dev/null && return 0
+    sleep 1
+  done
+  return 1
+}
+upgrade_metal(){
+  local f asset checksums=0
+  local scripts=(ansgo-genconf ansgo-admin ansgo-cert-reload ansgo-cert-issue.sh ansgo-sync-manual-cert ansgo-landing.sh dns_dynukey.sh)
+  local units=(ansgo-panel.service systemd/caddy.service systemd/sing-box.service systemd/ansgo-autoupgrade.service systemd/ansgo-autoupgrade.timer)
+  local -a needed=()
+  say "暂存 $VER 全部组件"
+  for f in "${scripts[@]}"; do
+    dl "$RAW/$f" "$STAGE/$f"
+    bash -n "$STAGE/$f"
+  done
+  dl "$RAW/upgrade.sh" "$STAGE/ansgo-upgrade"
+  bash -n "$STAGE/ansgo-upgrade"
+  for f in "${units[@]}"; do dl "$RAW/$f" "$STAGE/${f##*/}"; done
+  # 发布清单存在时必须校验；API 中有清单但下载失败不能降级跳过。
+  dl "https://api.github.com/repos/$REPO/releases/tags/$VER" "$STAGE/release.json"
+  checksum_name=$(python3 - "$STAGE/release.json" <<'PY'
+import json,sys
+names={a['name'] for a in json.load(open(sys.argv[1]))['assets']}
+print(next((n for n in ('SHA256SUMS','sha256sums.txt','checksums.txt') if n in names),''))
+PY
+)
+  if [ -n "$checksum_name" ]; then dl "$REL/$checksum_name" "$STAGE/SHA256SUMS"; checksums=1; fi
+  for asset in "ansgo-panel-linux-$AARCH" "caddy-naive-linux-$AARCH" "sing-box-linux-$AARCH.tar.gz"; do
+    dl "$REL/$asset" "$STAGE/$asset"
+    if [ "$checksums" = 1 ]; then
+      python3 - "$STAGE/SHA256SUMS" "$STAGE/$asset" <<'PY'
+import hashlib,os,sys
+manifest,path=sys.argv[1:]; expected=None
+for line in open(manifest):
+    parts=line.split()
+    name=parts[1].lstrip('*') if len(parts)==2 else ''
+    if name.startswith('./'): name=name[2:]
+    if len(parts)==2 and name==os.path.basename(path): expected=parts[0]
+h=hashlib.sha256()
+with open(path,'rb') as f:
+    for chunk in iter(lambda:f.read(65536),b''): h.update(chunk)
+assert expected and h.hexdigest()==expected.lower(), 'SHA256 校验失败'
+PY
+    fi
+  done
+  mv "$STAGE/ansgo-panel-linux-$AARCH" "$STAGE/ansgo-panel"
+  mv "$STAGE/caddy-naive-linux-$AARCH" "$STAGE/caddy"
+  mkdir "$STAGE/sb"
+  tar xzf "$STAGE/sing-box-linux-$AARCH.tar.gz" -C "$STAGE/sb" --no-same-owner
+  mapfile -t sb_bins < <(find "$STAGE/sb" -type f -name sing-box)
+  [ "${#sb_bins[@]}" = 1 ]
+  mv "${sb_bins[0]}" "$STAGE/sing-box"
+  for f in ansgo-panel sing-box caddy; do verify_elf "$STAGE/$f" "$([ "$f" != ansgo-panel ] || printf '%s' "$VER")"; chmod 755 "$STAGE/$f"; done
+  "$STAGE/caddy" list-modules | grep -Fq 'http.handlers.forward_proxy'
+  "$STAGE/sing-box" version
+  # 全部下载校验完成后才备份和切换。记录运行状态供失败恢复。
+  OLD_ACTIVE=()
+  for f in caddy sing-box ansgo-panel; do
+    if systemctl is-active --quiet "$f"; then OLD_ACTIVE+=("$f"); fi
+  done
+  OLD_ENABLED=()
+  for f in caddy sing-box ansgo-panel; do
+    if systemctl is-enabled --quiet "$f"; then OLD_ENABLED+=("$f"); fi
+  done
+  local paths=(/etc/ansgo /etc/ssl/ansgo /root/.acme.sh /etc/sing-box /etc/caddy
+    /etc/ansgo-deploy /etc/systemd/journald.conf.d/60-ansgo.conf
+    /etc/sysctl.d/99-ansgo-tune.conf)
+  for f in ansgo-panel caddy sing-box ansgo-limits ansgo-upgrade "${scripts[@]}"; do paths+=("/usr/local/bin/$f"); done
+  for f in "${units[@]}"; do paths+=("/etc/systemd/system/${f##*/}"); done
+  for f in caddy sing-box ansgo-panel; do paths+=("/etc/systemd/system/$f.service.d/10-ansgo-limits.conf"); done
+  METAL_PAUSED=1
+  systemctl stop ansgo-panel
+  BACKUP=$(ansgo_backup upgrade "${paths[@]}")
+  say "备份: $BACKUP"
+  MUTATED=1
+  for f in ansgo-panel caddy sing-box ansgo-limits ansgo-upgrade "${scripts[@]}"; do
+    # STAGE 在 /usr/local/bin 同一文件系统，rename 不产生半个正式文件。
+    chmod 755 "$STAGE/$f"
+    mv -f "$STAGE/$f" "/usr/local/bin/$f"
+  done
+  mkdir -p /etc/ansgo-deploy /etc/systemd/system
+  for f in "${scripts[@]}"; do install -m 755 "/usr/local/bin/$f" "/etc/ansgo-deploy/$f"; done
+  for f in "${units[@]}"; do install -m 644 "$STAGE/${f##*/}" "/etc/systemd/system/${f##*/}"; done
+  ansgo_migrate /etc/ansgo/panel.json /etc/ansgo/secrets.env
+  ansgo_limits
+  ansgo_tune
+  systemctl daemon-reload
+  ansgo_log_trim /var/log/ansgo/genconf.log
+  ansgo-genconf all >> /var/log/ansgo/genconf.log 2>&1
+  mapfile -t needed < <(active_services)
+  [ "${#needed[@]}" -gt 0 ]
+  for f in caddy sing-box; do
+    if ! printf '%s\n' "${needed[@]}" | grep -qx "$f"; then
+      systemctl stop "$f"
+      systemctl disable "$f"
+    fi
+  done
+  for f in "${needed[@]}"; do
+    # 三个二进制本次均刷新；关闭的载体不启动。
+    systemctl restart "$f"
+    wait_active "$f"
+  done
+  verify_panel
+  for f in "${needed[@]}"; do systemctl enable "$f"; done
+  MUTATED=0
+  METAL_PAUSED=0
+  ansgo-admin prune --yes || say '服务升级已完成；备份清理失败，请稍后执行 ansgo-admin prune --yes'
+}
+# Docker 只操作 inspect 查到的真实挂载；不创建猜测名称的空卷。
+docker_backup(){
+  local dest type name source helper_image
+  mkdir -p "$STAGE/docker/files"
+  docker inspect "$CID" > "$STAGE/docker/inspect.json"
+  cp -p "${original_compose:-$COMPOSE_FILE}" "$STAGE/docker/compose.yml"
+  helper_image=$(docker inspect -f '{{.Image}}' "$CID")
+  OLD_IMAGE="$helper_image"
+  while IFS=$'\t' read -r dest type name source; do
+    mkdir -p "$STAGE/docker/files$dest"
+    local mount
+    if [ "$type" = volume ]; then mount="type=volume,src=$name,dst=/source,readonly"
+    elif [ "$type" = bind ]; then mount="type=bind,src=$source,dst=/source,readonly"
+    else say "不支持的持久化挂载: $type $dest"; return 1; fi
+    docker run --rm --network none --entrypoint /bin/tar --mount "$mount" \
+      "$helper_image" -C /source -cf - . | tar xf - -C "$STAGE/docker/files$dest"
+  done < <(python3 - "$STAGE/docker/inspect.json" <<'PY'
+import json,sys
+for m in json.load(open(sys.argv[1]))[0]['Mounts']:
+    if m['Destination'] in ('/etc/ansgo','/etc/ssl/ansgo','/etc/caddy','/etc/sing-box','/root/.acme.sh'):
+        print('\t'.join([m['Destination'],m['Type'],m.get('Name','-'),m['Source']]))
+PY
+)
+  test -s "$STAGE/docker/files/etc/ansgo/panel.json"
+  test -s "$STAGE/docker/files/etc/ansgo/secrets.env"
+  python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$STAGE/docker/files/etc/ansgo/panel.json"
+  mkdir -p /etc/ansgo-backup
+  BACKUP="/etc/ansgo-backup/docker-$(date +%Y%m%d-%H%M%S)-$$.tar.gz"
+  tar czf "$BACKUP" -C "$STAGE/docker" .
+  chmod 600 "$BACKUP"
+  tar tzf "$BACKUP" | grep -Eq '^\.?/?files/etc/ansgo/panel.json$'
+}
+docker_rollback(){
+  local dest type name source
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" stop ansgo || return 1
+  while IFS=$'\t' read -r dest type name source; do
+    local mount
+    if [ "$type" = volume ]; then mount="type=volume,src=$name,dst=/target"
+    else mount="type=bind,src=$source,dst=/target"; fi
+    tar cf - -C "$STAGE/docker/files$dest" . |
+      docker run --rm -i --network none --entrypoint /bin/bash --mount "$mount" "$OLD_IMAGE" \
+        -c 'set -e
+          python3 -c '\''import os,shutil
+for name in os.listdir("/target"):
+    p=os.path.join("/target",name)
+    if os.path.isdir(p) and not os.path.islink(p): shutil.rmtree(p)
+    else: os.unlink(p)'\''
+          tar xf - -C /target' || return 1
+  done < <(python3 - "$STAGE/docker/inspect.json" <<'PY'
+import json,sys
+for m in json.load(open(sys.argv[1]))[0]['Mounts']:
+    if m['Destination'] in ('/etc/ansgo','/etc/ssl/ansgo','/etc/caddy','/etc/sing-box','/root/.acme.sh'):
+        print('\t'.join([m['Destination'],m['Type'],m.get('Name','-'),m['Source']]))
+PY
+)
+  cp -p "$STAGE/docker/compose.yml" "$COMPOSE_FILE"
+  # override 固定旧 image ID，避免原 latest 指向新镜像。
+  printf 'services:\n  ansgo:\n    image: %s\n' "$OLD_IMAGE" > "$STAGE/rollback.yml"
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" -f "$STAGE/rollback.yml" up -d --force-recreate --pull never ansgo
+}
 upgrade_docker(){
-  hr "Docker 升级 → ${VER}"
-
-  command -v docker >/dev/null || { err "未找到 docker（这台机器不是 Docker 部署形态？用 --metal 走裸金属路径）"; exit 1; }
-
-  if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
-    err "未找到 $DOCKER_COMPOSE_FILE"
-    err "Docker 部署的 compose 文件应在此路径。如果你的部署目录不同，请手动 cd 到该目录执行："
-    err "  docker compose pull && docker compose up -d"
-    exit 1
-  fi
-
-  local COMPOSE
-  COMPOSE=$(detect_compose)
-  if [ -z "$COMPOSE" ]; then
-    err "未找到 docker compose（v2 子命令）也未找到 docker-compose（v1）。"
-    err "  Debian/Ubuntu: apt-get install docker-compose-plugin"
-    exit 8
-  fi
-  log "compose 命令: $COMPOSE ($($COMPOSE version --short 2>/dev/null || echo unknown))"
-
-  # 备份配置卷（可选，失败不阻断升级）
-  hr "1/4 备份配置卷"
-  local TS backup_file
-  TS=$(date +%Y%m%d-%H%M%S)
-  backup_file="${DOCKER_DIR}/ansgo-etc-vol-backup-${TS}.tgz"
-  # 尝试备份 ansgo_etc 命名卷（compose project 名可能不同，用通配）
-  if docker run --rm -v ansgo_etc:/src:ro -v "${DOCKER_DIR}:/dst" alpine \
-       sh -c "tar czf /dst/$(basename "$backup_file") -C /src ." 2>/dev/null; then
-    ok "配置卷备份: $backup_file"
-  else
-    warn "配置卷备份跳过（卷名可能不是 ansgo_etc；volume 数据不会因重建容器丢失，可放心继续）"
-    rm -f "$backup_file"
-  fi
-
-  # v1.5.36: 镜像命名空间改写（GitHub 账号 jiasongji → 6667084 改名遗留）。
-  #   实测 ghcr 旧路径 ghcr.io/jiasongji/ansgo 是只读冻结快照：新镜像只推规范路径
-  #   ghcr.io/6667084/ansgo，旧路径拉到的永远是改名前的旧版本——存量 compose 若
-  #   仍引用旧路径，`compose pull` 永远拉不到新镜像（升级"没变化"）。这里幂等把
-  #   compose 内的 image: 引用改写为规范路径。
-  if grep -q "ghcr.io/jiasongji/ansgo" "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
-    cp -a "$DOCKER_COMPOSE_FILE" "${DOCKER_COMPOSE_FILE}.bak-pre-ns" 2>/dev/null || true
-    sed -i 's#ghcr\.io/jiasongji/ansgo#ghcr.io/6667084/ansgo#g' "$DOCKER_COMPOSE_FILE"
-    ok "已把 docker-compose.yml 镜像引用从旧命名空间 jiasongji 改写为规范命名空间 6667084（v1.5.36；旧路径已冻结拉不到新镜像）"
-  fi
-
-  # v1.5.32: 确保 Docker 手动证书「固定同步目录」与 compose 挂载存在（幂等）。
-  #   旧部署的 docker-compose.yml 没有该挂载，需要补上才能让 /host/manual-certs 生效。
-  mkdir -p "${DOCKER_DIR}/manual-certs"
-  chmod 700 "${DOCKER_DIR}/manual-certs"
-  local MOUNT_LINE="      - /etc/ansgo-docker/manual-certs:/host/manual-certs:ro"
-  if ! grep -q "manual-certs:/host/manual-certs" "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
-    # 在 ansgo_acme 那一行后面插入挂载（保持与仓库模板一致）
-    if grep -q "ansgo_acme:/root/.acme.sh" "$DOCKER_COMPOSE_FILE"; then
-      awk -v line="$MOUNT_LINE" '/- ansgo_acme:\/root\/\.acme\.sh/{print; print line; next} {print}' \
-        "$DOCKER_COMPOSE_FILE" > "$DOCKER_COMPOSE_FILE.tmp" && mv "$DOCKER_COMPOSE_FILE.tmp" "$DOCKER_COMPOSE_FILE"
-      ok "已为 docker-compose.yml 补充 manual-certs 固定挂载（v1.5.32）"
-    else
-      warn "docker-compose.yml 结构异常，未自动补充 manual-certs 挂载（如用 manual 模式，请手动加入：${MOUNT_LINE})"
+  CID=$("${COMPOSE[@]}" -f "$COMPOSE_FILE" ps -q ansgo)
+  [ -n "$CID" ]
+  dl "$RAW/ansgo-admin" "$STAGE/ansgo-admin"
+  bash -n "$STAGE/ansgo-admin"
+  say "拉取明确版本镜像: $VER"
+  docker pull "ghcr.io/6667084/ansgo:$VER"
+  # 先备份严格的“未迁移、未改 compose”快照；解析后的配置只用于生成新 compose。
+  original_compose=$(mktemp "$STAGE/compose-original.XXXXXX")
+  cp -p "$COMPOSE_FILE" "$original_compose"
+  # 从 compose 自身输出解析有效配置，无 YAML 依赖且不误改其它服务。
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" config > "$STAGE/compose.yml"
+  python3 - "$STAGE/compose.yml" "$VER" <<'PY'
+import re,sys
+p,version=sys.argv[1:]; lines=open(p).readlines(); start=None; end=None
+for i,line in enumerate(lines):
+    if line.rstrip()=='  ansgo:': start=i+1
+    elif start is not None and re.match(r'^  [^ ]|^[^ #]',line): end=i; break
+assert start is not None, 'compose 缺少 services.ansgo'
+end=end or len(lines); block=''.join(lines[start:end])
+block=re.sub(r'^    image:.*$', '    image: ghcr.io/6667084/ansgo:'+version,block,flags=re.M)
+assert re.search(r'^    image:',block,re.M)
+mem=int(next(x.split()[1] for x in open('/proc/meminfo') if x.startswith('MemTotal:')))//1024
+limit=mem*70//100 if mem<=1024 else 512
+def has(k): return bool(re.search(r'^    '+k+r':',block,re.M))
+add=[]
+for key,value in [('mem_limit',str(limit)+'m'),('pids_limit','512'),('cpu_shares','512'),('cpus','1.0')]:
+    if not has(key): add.append('    '+key+': '+value+'\n')
+if not has('memswap_limit'):
+    m=re.search(r'^    mem_limit:\s*(\S+)',block,re.M)
+    val=(m[1].strip('\'"') if m else str(limit)+'m').lower()
+    match=re.fullmatch(r'(\d+)([kmg]?)b?',val)
+    assert match, '无法解析用户 mem_limit'
+    n=int(match[1])*{'':1,'k':1024,'m':1024**2,'g':1024**3}[match[2]]
+    add.append('    memswap_limit: '+str(n+256*1024**2)+'\n')
+if not has('logging'):
+    add.append('    logging:\n      driver: json-file\n      options:\n        max-size: "10m"\n        max-file: "3"\n')
+else:
+    # 保留用户日志驱动，只为 json-file 独立补齐 options。
+    m=re.search(r'^    logging:\n((?:      .*\n|\n)*)',block,re.M)
+    assert m, 'logging 结构异常'
+    log=m[0]
+    if not re.search(r'^      driver:',log,re.M):
+        log=log.replace('    logging:\n','    logging:\n      driver: json-file\n',1)
+    if re.search(r'driver:\s*[\'\"]?json-file',log):
+        log=re.sub(r'^      options:[ \t]*\{\}[ \t]*$', '      options:', log, flags=re.M)
+        if not re.search(r'^      options:',log,re.M): log+='      options:\n'
+        for key,value in [('max-size','10m'),('max-file','3')]:
+            if not re.search(r'^        '+key+':',log,re.M):
+                log=re.sub(r'(^      options:\s*\n)',r'\1        '+key+': "'+value+'"\n',log,flags=re.M)
+        block=block[:m.start()]+log+block[m.end():]
+if '/host/manual-certs' not in block:
+    block=re.sub(r'(^    volumes:\s*\n)',r'\1      - type: bind\n        source: /etc/ansgo-docker/manual-certs\n        target: /host/manual-certs\n        read_only: true\n',block,flags=re.M)
+    assert '/host/manual-certs' in block, 'compose 缺少 volumes'
+open(p,'w').write(''.join(lines[:start])+''.join(add)+block+''.join(lines[end:]))
+PY
+  "${COMPOSE[@]}" --project-directory "$DOCKER_DIR" -f "$STAGE/compose.yml" config --quiet
+  # 先停止写入者再快照所有实际配置/证书/acme 卷，保证 SQLite 一致。
+  docker exec "$CID" systemctl stop ansgo-panel cron
+  DOCKER_PAUSED=1
+  docker_backup
+  MUTATED=1
+  # Docker 升级与裸金属使用同一旧格式迁移；新 schema 交给新版面板。
+  container_lib="/tmp/ansgo-limits.$$"
+  docker cp "$STAGE/ansgo-limits" "$CID:$container_lib"
+  docker exec "$CID" bash -c 'source "$1"; ansgo_migrate /etc/ansgo/panel.json /etc/ansgo/secrets.env; rc=$?; rm -f "$1"; exit "$rc"' _ "$container_lib"
+  mkdir -p "$DOCKER_DIR/manual-certs"
+  chmod 700 "$DOCKER_DIR/manual-certs"
+  install -m 600 "$STAGE/compose.yml" "$COMPOSE_FILE"
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" config --quiet
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" up -d --force-recreate ansgo
+  DOCKER_PAUSED=0
+  local i healthy=0
+  CID=$("${COMPOSE[@]}" -f "$COMPOSE_FILE" ps -q ansgo)
+  for i in {1..30}; do
+    if docker exec "$CID" systemctl is-active --quiet ansgo-panel &&
+       [ "$(docker exec "$CID" cat /usr/local/share/ansgo-version)" = "$VER" ]; then
+      healthy=1; break
     fi
-  fi
-
-  # v1.5.36: 确保 Docker 容器资源约束存在（幂等；已有限制则不动，尊重手动调优值）。
-  #   旧部署的 compose 无 mem_limit/memswap_limit/pids_limit/日志轮转，
-  #   内存泄漏或进程失控会拖垮小内存宿主（实测 464M VPS 长跑卡死只能强制重启）。
-  #   规则与 install.sh 一致：宿主 ≤1G → MemTotal*70% / +256m swap；>1G → 512m/768m。
-  #   约束生效后失控只会容器内 OOM，restart: unless-stopped 自动重启自愈。
-  #   注：pids_limit 与日志轮转独立于 mem_limit 补（生产实测：手动加过 mem_limit
-  #   的部署跳过整块补丁会连 pids_limit 也漏掉）。
-  local _mem_total_mb _cl _cs
-  _mem_total_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-  if [ -n "$_mem_total_mb" ] && [ "$_mem_total_mb" -le 1024 ] 2>/dev/null; then
-    _cl="$(( _mem_total_mb * 70 / 100 ))m"; _cs="$(( _mem_total_mb * 70 / 100 + 256 ))m"
-  else
-    _cl="512m"; _cs="768m"
-  fi
-  if grep -qE '^\s*mem_limit:' "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
-    log "docker-compose.yml 已有 mem_limit（保留现有值，不覆盖手动调优）"
-  elif grep -q 'restart: unless-stopped' "$DOCKER_COMPOSE_FILE"; then
-    cp -a "$DOCKER_COMPOSE_FILE" "${DOCKER_COMPOSE_FILE}.bak-pre-v1.5.36" 2>/dev/null || true
-    awk -v ml="    mem_limit: ${_cl}" -v ms="    memswap_limit: ${_cs}" -v pl="    pids_limit: 512" \
-        -v l1='    logging:' -v l2='      driver: json-file' \
-        -v l3='        max-size: "10m"' -v l4='        max-file: "3"' -v l5='      options:' \
-      '/restart: unless-stopped/ { print; print ml; print ms; print pl; print l1; print l2; print l5; print l3; print l4; next } { print }' \
-      "$DOCKER_COMPOSE_FILE" > "${DOCKER_COMPOSE_FILE}.tmp" \
-      && mv "${DOCKER_COMPOSE_FILE}.tmp" "$DOCKER_COMPOSE_FILE" \
-      && ok "已为 docker-compose.yml 补充资源约束（v1.5.36）: mem_limit=${_cl} memswap_limit=${_cs} pids_limit=512 + 日志 10m×3" \
-      || warn "docker-compose.yml 资源约束注入失败（结构异常？可手动在 ansgo 服务下加 mem_limit: ${_cl}）"
-  else
-    warn "docker-compose.yml 未找到 restart 行，未自动补资源约束（可手动加: mem_limit: ${_cl} / memswap_limit: ${_cs} / pids_limit: 512）"
-  fi
-  # pids_limit / 日志轮转独立补（mem_limit 已存在手动值时也补齐这两项）
-  if ! grep -qE '^\s*pids_limit:' "$DOCKER_COMPOSE_FILE" 2>/dev/null \
-     && grep -qE '^\s*mem_limit:' "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
-    sed -i '/^[[:space:]]*memswap_limit:/a\    pids_limit: 512' "$DOCKER_COMPOSE_FILE" 2>/dev/null \
-      && ok "已补充 pids_limit: 512（防 fork 炸弹；mem_limit 为手动值不受影响）" \
-      || warn "pids_limit 补充失败，可手动在 memswap_limit 下加一行: pids_limit: 512"
-  fi
-  if ! grep -qE '^\s*logging:' "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
-    if grep -qE '^[[:space:]]*pids_limit:' "$DOCKER_COMPOSE_FILE" 2>/dev/null; then
-      sed -i '/^[[:space:]]*pids_limit:/a\    logging:\n      driver: json-file\n      options:\n        max-size: "10m"\n        max-file: "3"' "$DOCKER_COMPOSE_FILE" 2>/dev/null \
-        && ok "已补充容器日志轮转（json-file 10m×3，防长期运行日志写满小盘）" || true
-    fi
-  fi
-
-  # 拉取新镜像
-  hr "2/4 拉取新镜像"
-  ( cd "$DOCKER_DIR" && $COMPOSE pull ) || { err "镜像拉取失败（检查网络/代理）"; exit 1; }
-  ok "镜像已更新"
-
-  # 重建容器（复用 volume，配置/密钥/证书不丢）
-  # v1.5.19: 必须 --force-recreate。普通 `up -d` 在镜像 digest 未变（compose 配置哈希相同）
-  #   时会跳过 recreate → entrypoint 不重跑 → 旧二进制继续运行，升级"没变化"。
-  #   --force-recreate 强制销毁重建容器，volume 数据不丢，entrypoint 重新执行：
-  #     ① ansgo-genconf 重新生成配置 ② systemd 全新状态拉起新版 caddy/sing-box/ansgo-panel
-  hr "3/4 重建容器（--force-recreate 确保 entrypoint 重跑 + 新二进制生效）"
-  ( cd "$DOCKER_DIR" && $COMPOSE up -d --force-recreate ) || { err "容器重建失败"; exit 1; }
-  ok "容器已重建（entrypoint 已重新执行）"
-
-  # 验证
-  hr "4/4 验证"
-  sleep 3
-  local container_status
-  container_status=$(docker ps --filter name=ansgo --format '{{.Status}}' 2>/dev/null | head -1)
-  if [ -n "$container_status" ]; then
-    ok "容器状态: ${container_status}"
-  else
-    err "未发现运行中的 ansgo 容器（docker ps -a 检查）"
-  fi
-
-  # 版本号验证（从容器日志读；容器重建后 systemd 要拉起 caddy→sing-box→ansgo-panel，
-  # 面板启动行可能十几秒才输出，轮询最多 30 秒）
-  # v1.5.36: 双通道读取。systemd 容器内 ansgo-panel.service 的 stdout 进容器内
-  #   journald（volatile），docker logs 只有 entrypoint 行 —— 生产实测 docker logs
-  #   通道常年空导致误报「未能读取版本号」。两个通道都试，任一命中即可。
-  local logged_ver="" vi
-  for vi in $(seq 1 15); do
     sleep 2
-    logged_ver=$(docker logs ansgo 2>&1 | grep -oE 'ansgo-panel v[0-9]+\.[0-9]+\.[0-9]+' \
-      | tail -1 | grep -oE 'v[0-9.]+$' || echo "")
-    [ -n "$logged_ver" ] && break
-    logged_ver=$(docker exec ansgo journalctl -u ansgo-panel --no-pager -n 20 2>/dev/null \
-      | grep -oE 'ansgo-panel v[0-9]+\.[0-9]+\.[0-9]+' | tail -1 | grep -oE 'v[0-9.]+$' || echo "")
-    [ -n "$logged_ver" ] && break
   done
-  if [ -n "$logged_ver" ]; then
-    if [ "$logged_ver" = "$VER" ]; then
-      ok "面板版本: ${logged_ver}（目标 ${VER} ✓）"
-    else
-      err "面板日志版本: ${logged_ver}（目标 ${VER}）—— 镜像可能未同步发版，或容器未真正重建"
-      err "排查：docker exec ansgo md5sum /usr/local/bin/ansgo-panel 对比 release 资产"
-      err "强制重建：cd $DOCKER_DIR && $COMPOSE up -d --force-recreate"
-    fi
-  else
-    warn "未能从容器日志读取版本号（可稍后执行：docker exec ansgo journalctl -u ansgo-panel --no-pager | grep 'ansgo-panel v'）"
-  fi
-
-  echo
-  hr "升级完成"
-  # 注意：必须用 printf 而非 echo（同 metal 分支，bash echo 不解释 \033 转义）
-  printf '  %bSOCKS5 默认未启用%b。启用方式：\n' "$C_Y" "$C_0"
-  echo "    1. 登录面板 →「服务管理」页 → SOCKS5 卡片 → 点「安装」"
-  echo "    2. 或进容器执行: docker exec ansgo ansgo-admin regen socks"
-  echo "    3. 查看连接 URI: docker exec ansgo ansgo-admin info"
-  echo
-  printf '  %b⚠️ 浏览器需硬刷新才能看到新界面%b（面板前端内嵌在二进制里，升级后必须清缓存）：\n' "$C_Y" "$C_0"
-  echo "    Windows/Linux: Ctrl+Shift+R   |   macOS: Cmd+Shift+R   |   或无痕窗口打开面板"
-  echo
-  echo "  回滚: 编辑 ${DOCKER_COMPOSE_FILE}，把 image: ghcr.io/6667084/ansgo:latest"
-  echo "        改成 :v1.5.15（或上一版），再 docker compose up -d"
+  [ "$healthy" = 1 ]
+  # compose config 只证明语法；再核验实际容器的硬内存、swap、pids 与 CPU 竞争权重。
+  docker inspect "$CID" --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.PidsLimit}} {{.HostConfig.CpuShares}} {{json .HostConfig.LogConfig}}' |
+    python3 -c 'import json,sys; p=sys.stdin.read().split(" ",4); assert len(p)==5 and all(int(x)>0 for x in p[:4]); log=json.loads(p[4]); assert log.get("Type"); assert log["Type"]!="json-file" or all(k in log.get("Config",{}) for k in ("max-size","max-file"))'
+  docker exec "$CID" bash -c '
+    source /usr/local/bin/ansgo-limits
+    port=$(python3 -c '\''import json;c=json.load(open("/etc/ansgo/panel.json"));print(c["panel_port"])'\'')
+    path=$(python3 -c '\''import json;c=json.load(open("/etc/ansgo/panel.json"));print(c["url_path"])'\'')
+    curl --noproxy "*" -kfsS --max-time 5 "https://127.0.0.1:$port${path}api/auth" >/dev/null'
+  MUTATED=0
+  docker exec "$CID" ansgo-admin prune --yes || say '容器升级已完成；容器内备份清理失败'
+  # 宿主的 Docker 备份也需保留策略；使用本次同版本 admin，不安装到宿主。
+  ANSGO_CONF="$STAGE/docker/files/etc/ansgo/panel.json" ANSGO_LIB="$STAGE/ansgo-limits" \
+    bash "$STAGE/ansgo-admin" prune --yes || say '容器升级已完成；宿主备份清理失败'
 }
-
-# =============================================================================
-# 主流程
-# =============================================================================
-main(){
-  hr "ANS-GO 升级脚本 → 目标版本 ${VER}"
-  log "架构: ${ARCH} → ${AARCH}  |  主机: $(hostname)"
-
-  check_disk
-
-  local mode
-  mode=$(detect_mode)
-
-  case "$mode" in
-    docker|metal)
-      log "检测到部署形态: ${mode}$([ -n "$FORCE_MODE" ] && echo "（--${FORCE_MODE} 强制）" || true)"
-      ;;
-    ambiguous)
-      err "同时检测到 Docker 和裸金属部署特征，无法自动判断形态。"
-      err "  Docker 标记:   $DOCKER_COMPOSE_FILE 存在"
-      err "  裸金属标记:    $METAL_CONF 或 $METAL_PANEL_BIN 存在"
-      err "请用 --docker 或 --metal 显式指定升级路径。"
-      exit 1
-      ;;
-    none)
-      err "未检测到 ANS-GO 部署（既无 ${DOCKER_COMPOSE_FILE}，也无裸金属特征）。"
-      err "如果是全新部署，请用 install.sh 而非本升级脚本。"
-      exit 1
-      ;;
-  esac
-
-  # 确认
-  if [ "$ASSUME_YES" != 1 ]; then
-    echo
-    printf "将升级到 ${C_B}${VER}${C_0}（${mode} 形态）。升级前会自动备份。继续？[y/N] "
-    local c; c=$(readtty)
-    case "${c:-}" in
-      y|Y) ;;
-      *) warn "已取消"; exit 0;;
-    esac
-  fi
-
-  case "$mode" in
-    metal)  upgrade_metal;;
-    docker) upgrade_docker;;
-  esac
-}
-
-main "$@"
+case "$MODE" in metal) upgrade_metal;; docker) upgrade_docker;; esac
+DONE=1

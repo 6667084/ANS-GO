@@ -9,11 +9,15 @@
 # 用法见末尾 usage() 或 README。
 # =============================================================================
 set -uo pipefail
-CONF="/etc/ansgo/panel.json"
-SECRETS="/etc/ansgo/secrets.env"
-CERTDIR="/etc/ssl/ansgo"
-BACKUP_ROOT="/etc"
-BVPANEL="/usr/local/bin/ansgo-panel"
+ROOT="${ANSGO_ROOT:-}"
+CONF="${ANSGO_CONF:-$ROOT/etc/ansgo/panel.json}"
+SECRETS="$ROOT/etc/ansgo/secrets.env"
+CERTDIR="$ROOT/etc/ssl/ansgo"
+BACKUP_ROOT="$ROOT/etc/ansgo-backup"
+LIB="${ANSGO_LIB:-/usr/local/bin/ansgo-limits}"
+[ -f "$LIB" ] || LIB="$(dirname "${BASH_SOURCE[0]}")/ansgo-limits"
+source "$LIB" || exit 1
+BVPANEL="$ROOT/usr/local/bin/ansgo-panel"
 DOMAIN_DEF="example.com"
 
 # ---------- 颜色 ----------
@@ -27,45 +31,165 @@ hr(){ printf '%s---- %s ----%s\n' "$C_B" "$*" "$C_0"; }
 _conf(){ python3 -c "import json; d=json.load(open('$CONF')); print(d.get('$1',''))" 2>/dev/null; }
 _setconf(){ # KEY VALUE  -> 写回 config.json (保留 2 空格缩进)
   python3 - "$1" "$2" <<'PY'
-import json,sys
-p="/etc/ansgo/panel.json"
+import json,os,sys
+p=os.environ.get("ANSGO_ROOT","")+"/etc/ansgo/panel.json"
 k,v=sys.argv[1],sys.argv[2]
 d=json.load(open(p))
 # 数值尽量转 int
 try: v=int(v)
 except: pass
 d[k]=v
-json.dump(d, open(p,"w"), indent=2, ensure_ascii=False)
-open(p,"a").write("\n")
+import os,tempfile
+fd,tmp=tempfile.mkstemp(dir=os.path.dirname(p),prefix=".ansgo-conf-")
+with os.fdopen(fd,"w") as f: json.dump(d,f,indent=2,ensure_ascii=False); f.write("\n")
+os.chmod(tmp,0o600); os.replace(tmp,p)
 PY
 }
-_loadsecrets(){ [ -f "$SECRETS" ] && { set -a; source "$SECRETS"; set +a; }; }
 DOMAIN(){ local d; d="$(_conf domain)"; echo "${d:-$DOMAIN_DEF}"; }
+_secret(){ python3 - "$SECRETS" "$1" <<'PYSEC'
+import sys
+p,key=sys.argv[1:]
+try:
+    for line in open(p):
+        if line.startswith(key+'='):
+            print(line.rstrip('\n').split('=',1)[1]); break
+except OSError: pass
+PYSEC
+}
 
 # ---------- 服务映射 ----------
 # ss / anytls 都由 sing-box 承载；naive 由 caddy 承载；panel 独立
 svc_of(){ case "$1" in ss|anytls|socks) echo sing-box;; naive|caddy) echo caddy;; panel) echo ansgo-panel;; *) echo "$1";; esac; }
 
-restart_svc(){ local s="$1"; systemctl restart "$s" 2>/dev/null && ok "已 restart $s" || err "restart $s 失败"; }
+restart_svc(){ local s="$1"; systemctl restart "$s" && systemctl is-active --quiet "$s" && ok "已 restart $s" || { err "restart $s 失败"; return 1; }; }
 stop_svc(){ local s="$1"; systemctl stop "$s" 2>/dev/null && ok "已 stop $s" || err "stop $s 失败"; }
 
 # ---------- 备份 ----------
-do_backup(){
-  local TS BK
-  TS=$(date +%Y%m%d-%H%M%S); BK="${BACKUP_ROOT}/ansgo-backup-${TS}"
-  mkdir -p "$BK"
-  for f in /etc/sing-box/config.json /etc/caddy/Caddyfile "$SECRETS" "$CONF" \
-           /etc/systemd/system/ansgo-panel.service /etc/systemd/system/sing-box.service /etc/systemd/system/caddy.service; do
-    [ -f "$f" ] && cp -a "$f" "$BK/$(echo "$f" | tr '/' '_')"
+_restart_after_restore_failure(){
+  local list="$1" svc rc=0
+  for svc in caddy sing-box ansgo-panel; do
+    printf '%s\n' "$list" | grep -qx "$svc" || continue
+    if systemctl restart "$svc" && systemctl is-active --quiet "$svc"; then
+      ok "已恢复原运行服务 $svc"
+    else
+      err "恢复失败后无法重启 $svc"
+      rc=1
+    fi
   done
-  [ -f /etc/ansgo/sessions.db ] && cp -a /etc/ansgo/sessions.db "$BK/sessions.db"
-  tar czf "${BK}.tar.gz" -C "$BACKUP_ROOT" "ansgo-backup-${TS}" 2>/dev/null
-  ok "备份 -> $BK  (打包: ${BK}.tar.gz)"
-  echo "$BK"
+  return "$rc"
+}
+
+do_backup(){
+  local archive
+  archive=$(ansgo_backup manual /etc/sing-box /etc/caddy /etc/ssl/ansgo \
+    /etc/ansgo /root/.acme.sh /etc/systemd/system/ansgo-panel.service \
+    /etc/systemd/system/sing-box.service /etc/systemd/system/caddy.service \
+    /etc/systemd/system/ansgo-panel.service.d /etc/systemd/system/caddy.service.d \
+    /etc/systemd/system/sing-box.service.d) || return 1
+  ok "备份 -> $archive"
+  cmd_prune --yes || return 1
+  return 0
+}
+
+cmd_prune(){
+  if [ "${1:-}" != --yes ]; then
+    local answer
+    read -r -p "按保留策略清理备份、过期临时文件及日志？[y/N] " answer
+    case "$answer" in y|Y) ;; *) return 0;; esac
+  fi
+  local freed
+  freed=$(python3 - "$ROOT" "$CONF" <<'PYPRUNE'
+import glob, json, os, re, shutil, sys, time
+root, conf = sys.argv[1:]
+try: keep = max(1, min(30, int(json.load(open(conf)).get('backup_keep', 5))))
+except (OSError, ValueError, TypeError): keep = 5
+now = time.time()
+def size(path):
+    if os.path.islink(path): return os.lstat(path).st_size
+    if os.path.isfile(path): return os.path.getsize(path)
+    total = 0
+    for base, dirs, files in os.walk(path, followlinks=False):
+        for name in files:
+            try: total += os.lstat(os.path.join(base, name)).st_size
+            except OSError: pass
+        # 目录自身通常只占 4K；不累加以免小盘备份被数量放大。
+    return total
+freed = 0
+def remove(path):
+    global freed
+    n = size(path)
+    if os.path.isdir(path) and not os.path.islink(path): shutil.rmtree(path)
+    else: os.unlink(path)
+    freed += n
+    print('已清理: '+path, file=sys.stderr)
+paths = []
+for pattern in ('/etc/ansgo-backup/*', '/etc/ansgo-backup-*',
+                '/etc/ansgo-docker/ansgo-etc-vol-backup-*.tgz'):
+    for path in glob.glob(root+pattern):
+        # 只删除项目命名的备份；忽略进行中的隐藏暂存目录及用户文件。
+        m = re.fullmatch(r'(.+)-(\d{8}-\d{6})(?:-\d+)?(?:\.tar\.gz|\.tgz)?', os.path.basename(path))
+        if m and not os.path.islink(path): paths.append((path, m[1], m[2]))
+groups = {}
+for path, category, stamp in paths:
+    groups.setdefault(category, []).append((path, stamp))
+remaining = []
+for items in groups.values():
+    items.sort(key=lambda x: (x[1], os.stat(x[0]).st_mtime_ns), reverse=True)
+    for path, stamp in items[keep:]: remove(path)
+    remaining.extend(items[:keep])
+remaining.sort(key=lambda x: (x[1], os.stat(x[0]).st_mtime_ns))
+total = sum(size(p) for p, _ in remaining)
+for path, _ in remaining:
+    if total <= 200*1024*1024: break
+    n = size(path); remove(path); total -= n
+for pattern in ('/etc/ansgo/probe-tmp/*', '/tmp/sing-box-*', '/tmp/caddy-naive-build',
+                '/tmp/acme.sh-*', '/root/acme.sh-*', '/tmp/ansgo-ss-probe-*',
+                '/tmp/sb.tgz', '/tmp/acme.tar.gz', '/tmp/go.tgz'):
+    for path in glob.glob(root+pattern):
+        if not os.path.islink(path) and now-os.stat(path).st_mtime > 600:
+            remove(path)
+# 会话/锁定表过期项属于本次清理的一部分；SQLite 不存在时跳过。
+db = root+'/etc/ansgo/sessions.db'
+if os.path.isfile(db):
+    import sqlite3
+    try:
+        with sqlite3.connect(db, timeout=2) as con:
+            before=os.path.getsize(db)
+            con.execute('DELETE FROM sessions WHERE expires < ?', (int(now),))
+            try: con.execute("DELETE FROM lockout WHERE locked_until < ?", (int(now),))
+            except sqlite3.OperationalError: pass
+            con.commit()
+            con.execute('PRAGMA wal_checkpoint(PASSIVE)')
+        freed += max(0, before-os.path.getsize(db))
+    except sqlite3.Error as exc:
+        print('SQLite 清理跳过: '+str(exc), file=sys.stderr)
+print(freed)
+PYPRUNE
+) || return 1
+  # 测试根目录下不触碰宿主 journald。
+  if [ -z "$ROOT" ] && command -v journalctl >/dev/null; then
+    journalctl --vacuum-size=50M >&2 || return 1
+  fi
+  printf 'FREED_BYTES=%s\n' "$freed"
 }
 
 # ---------- 密钥更新 ----------
-_setsecret(){ local k="$1" v="$2"; if grep -q "^${k}=" "$SECRETS"; then sed -i "s|^${k}=.*|${k}=${v}|" "$SECRETS"; else echo "${k}=${v}" >> "$SECRETS"; fi; }
+_setsecret(){
+  python3 - "$SECRETS" "$1" "$2" <<'PYSECRET'
+import os, re, sys, tempfile
+p, k, v = sys.argv[1:]
+if not re.fullmatch(r'[A-Z][A-Z0-9_]*', k) or any(c in v for c in "'\n\r$`\\\";|&()<>\t "):
+    sys.exit('凭证包含不安全 shell 字符，请使用字母数字及常规符号')
+lines = open(p).read().splitlines() if os.path.exists(p) else []
+lines = [line for line in lines if not line.startswith(k+'=')]+[k+'='+v]
+fd, tmp = tempfile.mkstemp(prefix='.ansgo-secret-', dir=os.path.dirname(p))
+try:
+    with os.fdopen(fd, 'w') as f: f.write('\n'.join(lines)+'\n')
+    os.chmod(tmp, 0o600); os.replace(tmp,p)
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
+PYSECRET
+}
 gen_ss_key(){ openssl rand -base64 16; }
 gen_anytls_pass(){ openssl rand -hex 16; }
 gen_naive_user(){ openssl rand -hex 6; }
@@ -76,13 +200,16 @@ gen_panel_pass(){ openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 22; }
 
 # ---------- URI 生成 ----------
 print_uris(){
-  _loadsecrets
   local domain; domain="$(DOMAIN)"
-  local ss_port anytls_port socks_port naive_port
+  local ss_port anytls_port socks_port naive_port SS_METHOD SS_KEY ANYTLS_PASS SOCKS_USER SOCKS_PASS NAIVE_USER NAIVE_PASS
   ss_port="$(_conf ss_port)"; anytls_port="$(_conf anytls_port)"; socks_port="$(_conf socks_port)"; naive_port="$(_conf naive_port)"
+  SS_METHOD="$(_secret SS_METHOD)"; [ -n "$SS_METHOD" ] || SS_METHOD=2022-blake3-aes-128-gcm
+  SS_KEY="$(_secret SS_KEY)"
+  ANYTLS_PASS="$(_secret ANYTLS_PASS)"; SOCKS_USER="$(_secret SOCKS_USER)"
+  SOCKS_PASS="$(_secret SOCKS_PASS)"; NAIVE_USER="$(_secret NAIVE_USER)"; NAIVE_PASS="$(_secret NAIVE_PASS)"
   # v1.5.26: 落地服务凭证（LANDING_<id>_PASS），由 python 段读取 secrets.env 全量后匹配
   python3 - "$domain" "${ss_port:-23456}" "${anytls_port:-8443}" "${socks_port:-10808}" "${naive_port:-44333}" \
-          "${SS_METHOD:-2022-blake3-aes-128-gcm}" "${SS_KEY:-}" "${ANYTLS_PASS:-}" "${SOCKS_USER:-}" "${SOCKS_PASS:-}" "${NAIVE_USER:-}" "${NAIVE_PASS:-}" \
+          "$SS_METHOD" "${SS_KEY:-}" "${ANYTLS_PASS:-}" "${SOCKS_USER:-}" "${SOCKS_PASS:-}" "${NAIVE_USER:-}" "${NAIVE_PASS:-}" \
           "$CONF" "$SECRETS" <<'PY'
 import sys,base64,urllib.parse,json
 domain,ssp,atp,sop,nvp,method,ssk,atp_pass,su,sp,nu,np,CONF,SECRETS=sys.argv[1:15]
@@ -139,7 +266,7 @@ cmd_status(){
   cmd_cert_status 2>/dev/null || true
 }
 
-cmd_info(){ _loadsecrets; hr "节点信息"; echo "  域名: $(DOMAIN)"; print_uris; hr "面板"; echo "  端口: $(_conf panel_port)"; echo "  路径: $(_conf url_path)"; echo "  用户: $(_conf admin_user)"; }
+cmd_info(){ hr "节点信息"; echo "  域名: $(DOMAIN)"; print_uris; hr "面板"; echo "  端口: $(_conf panel_port)"; echo "  路径: $(_conf url_path)"; echo "  用户: $(_conf admin_user)"; }
 
 cmd_restart(){
   local t="${1:-all}"
@@ -156,11 +283,10 @@ cmd_logs(){ local t="${1:-all}"; case "$t" in ss|anytls|socks|sing-box) journalc
 
 cmd_regen(){
   local t="${1:-}"; [ -z "$t" ] && { err "用法: ansgo-admin regen [ss|anytls|socks|naive]"; return 1; }
-  do_backup >/dev/null
-  _loadsecrets
+  do_backup >/dev/null || return 1
   case "$t" in
     ss)
-      local k; k="$(gen_ss_key)"; _setsecret SS_KEY "$k"; _setsecret SS_METHOD "${SS_METHOD:-2022-blake3-aes-128-gcm}"
+      local k m; k="$(gen_ss_key)"; m="$(_secret SS_METHOD)"; [ -n "$m" ] || m=2022-blake3-aes-128-gcm; _setsecret SS_KEY "$k"; _setsecret SS_METHOD "$m"
       warn "已重置 SS 密钥，将重启 sing-box（现有连接会断开）。"
       ansgo-genconf sing-box && restart_svc sing-box && print_uris;;
     anytls)
@@ -191,7 +317,7 @@ cmd_regen2(){
 cmd_regen_landing(){
   local id="${1:-}"
   [ -n "$id" ] || { err "用法: ansgo-admin regen-landing <id>"; return 1; }
-  do_backup >/dev/null
+  do_backup >/dev/null || return 1
   local p u
   p="$(gen_anytls_pass)"; u="$(cat /proc/sys/kernel/random/uuid)"
   _setsecret "LANDING_${id}_PASS" "$p"; _setsecret "LANDING_${id}_UUID" "$u"
@@ -205,7 +331,6 @@ cmd_group2(){
   warn "group2 命令已弃用（v1.5.26），请用面板「落地服务」页管理落地服务"
   local act="${1:-status}"
   if [ "$act" = "status" ]; then
-    _loadsecrets
     echo "landings 配置见 $CONF 的 landings 数组"
     echo "LANDING_1_PASS=${LANDING_1_PASS:-未生成}"
     return
@@ -222,7 +347,12 @@ cmd_cert_status(){
   printf "  剩余天数: %s\n" "$days"
 }
 
-cmd_cert_renew(){ do_backup >/dev/null; warn "手动触发 acme.sh 续期..."; /root/.acme.sh/acme.sh --renew -d "$(DOMAIN)" --ecc --force 2>&1 | tail -15; }
+cmd_cert_renew(){ do_backup >/dev/null || return 1; warn "手动触发 acme.sh 续期..."; local log=/var/log/ansgo/cert-issue.log rc=0
+  ansgo_log_trim "$log"
+  /root/.acme.sh/acme.sh --renew -d "$(DOMAIN)" --ecc --force >>"$log" 2>&1 || rc=$?
+  if [ "$rc" = 0 ]; then /usr/local/bin/ansgo-cert-reload >>"$log" 2>&1 || rc=$?; fi
+  tail -15 "$log"
+  return "$rc"; }
 
 # cmd_cert_issue：用 panel.json 里保存的 Dynu 凭证触发一次完整签发（v1.5.27）。
 # 对应面板「证书管理」页的「🚀 立即签发证书」。适用 manual→acme 切换后或证书丢失。
@@ -236,8 +366,8 @@ try:
 except Exception as e:
     sys.exit(0)
 def sh(v):
-    v=(v or '').replace("'", "'\\''")
-    return v
+    import shlex
+    return shlex.quote(v or '')
 print(f"DOMAIN={sh(d.get('domain',''))}")
 print(f"EMAIL={sh(d.get('acme_email',''))}")
 print(f"DYNU_API_KEY={sh(d.get('dynu_api_key',''))}")
@@ -250,7 +380,10 @@ PY
   warn "触发 Let's Encrypt DNS-01 签发（域名=$DOMAIN），约 1-3 分钟..."
   DOMAIN="$DOMAIN" EMAIL="$EMAIL" \
     DYNU_API_KEY="$DYNU_API_KEY" DYNU_CLIENT_ID="$DYNU_CLIENT_ID" DYNU_SECRET="$DYNU_SECRET" \
-    bash /etc/ansgo-deploy/ansgo-cert-issue.sh 2>&1 | tail -25
+    bash "$ROOT/etc/ansgo-deploy/ansgo-cert-issue.sh" >/dev/null 2>&1
+  local rc=$?
+  tail -25 /var/log/ansgo/cert-issue.log
+  return "$rc"
 }
 
 cmd_panel_pass(){
@@ -261,14 +394,14 @@ cmd_panel_pass(){
 }
 cmd_panel_path(){
   local p="/$(openssl rand -hex 4)/"
-  do_backup >/dev/null; _setconf url_path "$p"; restart_svc ansgo-panel
+  do_backup >/dev/null || return 1; _setconf url_path "$p"; restart_svc ansgo-panel
   ok "新面板 URL 路径: $p"
   echo "  完整地址: https://$(DOMAIN):$(_conf panel_port)$p"
 }
 cmd_panel_port(){
   local p="${1:-15608}"
   case "$p" in ''|*[!0-9]*) err "端口必须为数字"; return 1;; esac
-  do_backup >/dev/null; _setconf panel_port "$p"; restart_svc ansgo-panel
+  do_backup >/dev/null || return 1; _setconf panel_port "$p"; restart_svc ansgo-panel
   ok "面板端口已改为 $p，请用新端口访问（会话已重置需重新登录）。"
 }
 
@@ -283,43 +416,116 @@ cmd_firewall(){
 }
 
 cmd_update(){
-  local t="${1:-}"; [ -z "$t" ] && { err "用法: ansgo-admin update [sing-box|caddy|panel]"; return 1; }
-  do_backup >/dev/null
-  local arch; arch="$(uname -m)"; arch="${arch/x86_64/amd64}"
-  case "$t" in
-    sing-box)
-      local rel url ext="tar.gz"
-      rel="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["tag_name"])' 2>/dev/null)"
-      [ -z "$rel" ] && { err "无法获取最新版本"; return 1; }
-      url="https://github.com/SagerNet/sing-box/releases/download/${rel}/sing-box-${rel#v}-linux-${arch}.${ext}"
-      warn "下载 sing-box $rel ..."
-      curl -fsSL "$url" -o /tmp/sb.tgz && tar xzf /tmp/sb.tgz -C /tmp && cp -a /tmp/sing-box-*/sing-box /usr/local/bin/sing-box.new && chmod +x /usr/local/bin/sing-box.new
-      /usr/local/bin/sing-box.new version >/dev/null 2>&1 && { mv /usr/local/bin/sing-box /usr/local/bin/sing-box.bak; mv /usr/local/bin/sing-box.new /usr/local/bin/sing-box; restart_svc sing-box; ok "sing-box 升级到 $rel"; } || err "新二进制校验失败，已回退";;
-    caddy)
-      warn "caddy 为 naive 分支定制版，建议在 mac 上重新编译后用 'ansgo-admin update panel' 同类方式上传。当前自动升级可能引入非 naive 版本，已跳过。";;
+  local target="${1:-}"
+  case "$target" in
+    sing-box|caddy) /usr/local/bin/ansgo-upgrade --yes --metal;;
     panel)
       local src="${2:-}"
-      if [ -n "$src" ] && [ -f "$src" ]; then cp -a "$src" "${BVPANEL}.new" && chmod +x "${BVPANEL}.new" && mv "$BVPANEL" "${BVPANEL}.bak" && mv "${BVPANEL}.new" "$BVPANEL" && restart_svc ansgo-panel && ok "panel 已更新"
-      else err "用法: ansgo-admin update panel <新二进制路径>（在 mac 交叉编译后 scp 上传，再执行本命令）"; fi;;
-    *) err "未知目标: $t";;
+      [ -s "$src" ] || { err "用法: ansgo-admin update panel <新二进制路径>"; return 1; }
+      do_backup >/dev/null || return 1
+      (
+        set -e
+        stage=$(mktemp -d /usr/local/bin/.ansgo-update.XXXXXX)
+        trap 'rm -rf "$stage"' EXIT
+        cp "$src" "$stage/panel"
+        # 同时检查 ELF 架构，拒绝非当前平台可执行文件。
+        python3 - "$stage/panel" <<'PYELF'
+import platform, struct, sys
+h=open(sys.argv[1], 'rb').read(20)
+arch={'x86_64':62, 'aarch64':183, 'arm64':183}.get(platform.machine())
+assert len(h)==20 and h[:5]==b'\x7fELF\x02' and h[5]==1
+assert struct.unpack('<H',h[18:20])[0]==arch, 'ELF 架构不匹配'
+PYELF
+        cp -p "$BVPANEL" "$stage/old"
+        chmod 755 "$stage/panel"
+        mv "$stage/panel" "$BVPANEL"
+        if ! restart_svc ansgo-panel; then
+          mv "$stage/old" "$BVPANEL"
+          restart_svc ansgo-panel || true
+          exit 1
+        fi
+      );;
+    *) err "用法: ansgo-admin update [sing-box|caddy|panel <路径>]"; return 1;;
   esac
 }
 
 cmd_restore(){
-  local BK="${1:-$(ls -1dt ${BACKUP_ROOT}/ansgo-backup-* 2>/dev/null | head -1)}"
-  [ -d "$BK" ] || { err "未找到备份目录: $BK"; return 1; }
-  warn "将从 $BK 回滚配置（需手动 restart 服务）。"
-  for f in /etc/sing-box/config.json /etc/caddy/Caddyfile "$SECRETS" "$CONF" /etc/systemd/system/ansgo-panel.service; do
-    local src="$BK/$(echo "$f" | tr '/' '_')"
-    [ -f "$src" ] && cp -a "$src" "$f" && ok "已还原 $f"
-  done
-  echo "提示: systemctl restart caddy sing-box ansgo-panel"
+  local archive="${1:-}"
+  if [ -z "$archive" ]; then
+    archive=$(python3 - "$BACKUP_ROOT" <<'PYLATEST'
+import glob, os, sys, tarfile
+for path in sorted(glob.glob(sys.argv[1]+'/*.tar.gz'),key=os.path.getmtime,reverse=True):
+    try:
+        with tarfile.open(path) as tar: tar.getmember('manifest.json')
+    except (OSError, tarfile.TarError, KeyError): continue
+    print(path)
+    break
+PYLATEST
+)
+  fi
+  [ -f "$archive" ] || { err "未找到备份: $archive"; return 1; }
+  local was_active="" was_enabled="" svc rc=0 rollback path_list
+  local -a restore_paths=()
+  path_list=$(python3 - "$archive" <<'PYMANIFEST'
+import json, sys, tarfile
+with tarfile.open(sys.argv[1]) as tar:
+    for entry in json.load(tar.extractfile('manifest.json')):
+        p=entry['path']
+        if not p or p.startswith('/') or any(x in ('', '.', '..') for x in p.split('/')) or any(ord(c)<32 for c in p):
+            raise ValueError('非法 manifest')
+        print('/'+p)
+PYMANIFEST
+) || return 1
+  while IFS= read -r path; do restore_paths+=("$path"); done <<< "$path_list"
+  if [ -z "$ROOT" ]; then
+    for svc in caddy sing-box ansgo-panel; do
+      systemctl is-active --quiet "$svc" && was_active+="$svc"$'\n'
+      systemctl is-enabled --quiet "$svc" && was_enabled+="$svc"$'\n'
+    done
+    # 先停写入者；inactive unit 正常也会返回 0，失败则不继续覆盖运行文件。
+    if ! systemctl stop ansgo-panel caddy sing-box; then
+      _restart_after_restore_failure "$was_active" || true
+      return 1
+    fi
+  fi
+  rollback=$(ansgo_backup restore "${restore_paths[@]}") || {
+    [ -n "$ROOT" ] || _restart_after_restore_failure "$was_active" || true
+    return 1
+  }
+  if ! ansgo_restore "$archive"; then
+    [ -z "$ROOT" ] && _restart_after_restore_failure "$was_active" || true
+    return 1
+  fi
+  if [ -z "$ROOT" ]; then
+    if ! systemctl daemon-reload || ! ansgo_logs_init ||
+       ! ansgo_log_trim /var/log/ansgo/genconf.log ||
+       ! ansgo-genconf all >> /var/log/ansgo/genconf.log 2>&1; then
+      rc=1
+    fi
+    # 与开机语义一致，恢复所有原启用载体；单个失败不阻止其余服务恢复，但整体返回非零。
+    for svc in caddy sing-box ansgo-panel; do
+      printf '%s\n' "$was_enabled" | grep -qx "$svc" || continue
+      [ "$rc" = 0 ] || break
+      restart_svc "$svc" || rc=1
+    done
+    if [ "$rc" != 0 ]; then
+      err "恢复后验证失败，回滚到恢复操作前的完整快照: $rollback"
+      systemctl stop ansgo-panel caddy sing-box || true
+      ansgo_restore "$rollback" || err "快照回滚失败，请保留备份手动排查: $rollback"
+      systemctl daemon-reload || true
+      _restart_after_restore_failure "$was_active" || true
+      return 1
+    fi
+  fi
+  ok "已恢复完整备份: $archive"
+  cmd_prune --yes
 }
 
 cmd_uninstall(){
   warn "将停止并移除 ansgo-panel / ansgo-admin / ansgo-genconf / ansgo-cert-reload（保留 sing-box caddy 与所有配置备份）。"
   read -r -p "确认卸载面板管理组件? 输入 yes: " a
   [ "$a" = "yes" ] || { echo "已取消"; return; }
+  systemctl disable --now ansgo-autoupgrade.timer 2>/dev/null || true
   systemctl stop ansgo-panel 2>/dev/null; systemctl disable ansgo-panel 2>/dev/null
   rm -f /usr/local/bin/ansgo-panel /usr/local/bin/ansgo-admin /usr/local/bin/ansgo-genconf /usr/local/bin/ansgo-cert-reload
   rm -f /etc/systemd/system/ansgo-panel.service; systemctl daemon-reload
@@ -344,7 +550,9 @@ ansgo-admin —— ANS-GO 离线管理
   panel-port [PORT]           重置面板端口（兜底）
   firewall [list|open PORT|close PORT]
   backup                      备份所有配置
-  restore [备份目录]           回滚配置
+  prune [--yes]               清理备份/过期临时文件，输出 FREED_BYTES
+  upgrade [升级参数]           调用统一版本升级器
+  restore [备份.tar.gz]           回滚配置
   update  [sing-box|caddy|panel [路径]]
   uninstall                   卸载面板管理组件（保留配置备份）
 EOF
@@ -368,6 +576,8 @@ case "$cmd" in
   panel-port) cmd_panel_port "${1:-}";;
   firewall) cmd_firewall "${1:-list}" "${2:-}";;
   backup) do_backup;;
+  prune) cmd_prune "${1:-}";;
+  upgrade) /usr/local/bin/ansgo-upgrade "$@";;
   restore) cmd_restore "${1:-}";;
   update) cmd_update "${1:-}" "${2:-}";;
   uninstall) cmd_uninstall;;
