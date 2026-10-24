@@ -824,6 +824,10 @@ do_uninstall(){
     rm -rf /etc/ansgo-backup /etc/ansgo-backup-* /etc/ansgo-uninstall-backup-* \
            /var/lib/ansgo /var/log/ansgo
     rm -f /etc/ansgo-cert.status
+    # 旧日志路径的兼容软链（ansgo-limits 的 ansgo_logs_init 创建）
+    for f in /root/ansgo-cert-issue.log /var/log/ansgo-cert.log /var/log/ansgo-genconf.log; do
+      if [ -L "$f" ]; then rm -f "$f"; fi
+    done
   fi
   hr "卸载完成（purge=${PURGE}）"
   [ "$PURGE" = 0 ] && echo "提示：彻底删除一切请重跑  bash install.sh --uninstall --purge"
