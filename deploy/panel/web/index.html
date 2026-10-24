@@ -1,1197 +1,286 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
 <title>ANS-GO 管理面板</title>
 <script src="static/qrcode.min.js"></script>
 <style>
-  /* 暗黑（默认）*/
-  :root,[data-theme="dark"]{--bg:#0f1419;--card:#1a2029;--card2:#222b36;--txt:#d4dae0;--mut:#8b97a3;--acc:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--bd:#2d3744;--hover:#2f3a47}
-  /* 白天 */
-  [data-theme="light"]{--bg:#f5f7fa;--card:#ffffff;--card2:#eef2f7;--txt:#1a2029;--mut:#6b7785;--acc:#2563eb;--ok:#16a34a;--warn:#d97706;--err:#dc2626;--bd:#d8dee8;--hover:#e2e8f0}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--txt);font-size:14px;line-height:1.5;transition:background .2s,color .2s}
-  a{color:var(--acc);text-decoration:none}
-  button{cursor:pointer;font-family:inherit;font-size:13px;border:none;border-radius:6px;padding:7px 14px;background:var(--card2);color:var(--txt);transition:.15s}
-  button:hover{background:var(--hover)}
-  button.primary{background:var(--acc);color:#fff}
-  button.primary:hover{background:var(--acc);opacity:.9}
-  button.danger{background:var(--err);color:#fff}
-  button.danger:hover{background:var(--err);opacity:.9}
-  button.ok{background:var(--ok);color:#fff}
-  input,select{font-family:inherit;font-size:13px;background:var(--card2);border:1px solid var(--bd);color:var(--txt);border-radius:6px;padding:7px 10px;width:100%}
-  input:focus{outline:none;border-color:var(--acc)}
-  .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-bottom:14px}
-  .card h3{font-size:14px;color:var(--txt);margin-bottom:12px;display:flex;align-items:center;gap:8px}
-  .mut{color:var(--mut)}
-  /* login */
-  #login{display:flex;align-items:center;justify-content:center;min-height:100vh}
-  .login-box{width:340px;max-width:90vw}
-  .login-box h1{font-size:20px;text-align:center;margin-bottom:6px}
-  .login-box .sub{text-align:center;color:var(--mut);margin-bottom:20px;font-size:12px}
-  .login-box button{width:100%;margin-top:8px;padding:9px}
-  .login-err{color:var(--err);font-size:12px;margin-top:8px;min-height:16px;text-align:center}
-  .forgot{margin-top:14px;font-size:12px;color:var(--mut);text-align:center}
-  .forgot code{background:var(--card2);padding:2px 6px;border-radius:4px;color:var(--warn)}
-  /* app layout: topbar + (sidebar + content) */
-  #app{display:none;flex-direction:column;min-height:100vh}
-  .topbar{background:var(--card);border-bottom:1px solid var(--bd);padding:10px 18px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:30;flex-shrink:0}
-  .topbar-left{display:flex;align-items:center;gap:10px}
-  .topbar .brand{font-weight:600;font-size:15px}
-  .menu-btn{display:none;background:transparent;font-size:18px;padding:6px 9px;line-height:1}
-  .main-wrap{display:flex;flex:1;min-height:0}
-  .sidebar{width:200px;background:var(--card);border-right:1px solid var(--bd);flex-shrink:0;display:flex;flex-direction:column;padding:8px 0 12px;overflow:hidden hidden;transition:width .2s ease}
-  .sidebar.collapsed{width:58px}
-  .collapse-btn{margin:0 10px 8px;background:transparent;color:var(--mut);padding:7px;border-radius:6px;text-align:center;font-size:13px}
-  .collapse-btn:hover{background:var(--hover);color:var(--txt)}
-  .nav{display:flex;flex-direction:column;gap:2px;padding:0 8px;overflow-y:auto;overflow-x:hidden;flex:1}
-  .nav button{display:flex;align-items:center;gap:10px;background:transparent;border:none;border-radius:6px;padding:9px 12px;color:var(--mut);text-align:left;width:100%;font-size:13px;transition:.15s}
-  .nav button:hover{background:var(--hover);color:var(--txt)}
-  .nav button .ico{font-size:15px;flex-shrink:0;width:22px;text-align:center;line-height:1}
-  .nav button .label{flex:1;white-space:nowrap;overflow:hidden}
-  .nav button.active{background:var(--acc);color:#fff}
-  .nav button.active:hover{background:var(--acc);color:#fff;opacity:.92}
-  .sidebar.collapsed .nav button{justify-content:center;padding:9px 0}
-  /* v1.5.22: 侧栏底部版本号（常驻可见，方便核实升级是否生效） */
-  .side-footer{padding:8px 14px 2px;color:var(--mut);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-top:1px solid var(--bd);margin-top:4px}
-  .side-footer #verTag{font-weight:600;color:var(--acc)}
-  .sidebar.collapsed .side-footer{padding:8px 0 2px;text-align:center;font-size:9px}
-  .sidebar.collapsed .side-footer #verTag{display:block}
-  .sidebar.collapsed .nav button .label,.sidebar.collapsed .collapse-btn .lbl{display:none}
-  .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:25}
-  .content{flex:1;padding:18px;overflow:auto;max-width:1100px;margin:0 auto;width:100%}
-  /* 滚动条美化（侧边栏长导航） */
-  .nav::-webkit-scrollbar{width:6px}
-  .nav::-webkit-scrollbar-thumb{background:var(--bd);border-radius:3px}
-  .grid{display:grid;gap:12px}
-  .grid.g4{grid-template-columns:repeat(4,1fr)}
-  .grid.g3{grid-template-columns:repeat(3,1fr)}
-  .grid.g2{grid-template-columns:repeat(2,1fr)}
-  @media(max-width:760px){.grid.g4,.grid.g3,.grid.g2{grid-template-columns:1fr}}
-  .stat{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:14px}
-  .stat .lbl{color:var(--mut);font-size:12px;margin-bottom:6px}
-  .stat .val{font-size:18px;font-weight:600;color:var(--txt)}
-  .stat .sub{font-size:11px;color:var(--mut);margin-top:2px}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  td,th{padding:8px 10px;border-bottom:1px solid var(--bd);text-align:left}
-  th{color:var(--mut);font-weight:500;font-size:12px}
-  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
-  .dot.on{background:var(--ok)} .dot.off{background:var(--err)} .dot.unk{background:var(--mut)}
-  /* v1.5.20: 顶栏管理面板状态圆点（紧贴用户名右侧，纯展示，hover 显示状态+端口） */
-  #panelDot{margin:0 10px 0 4px;width:9px;height:9px;cursor:default;transition:background .2s}
-  .uri-box{background:var(--card2);border:1px solid var(--bd);border-radius:6px;padding:10px;font-family:monospace;font-size:12px;word-break:break-all;margin:8px 0}
-  .row{display:flex;gap:8px;align-items:center;margin-bottom:10px}
-  .row label{width:120px;color:var(--mut);font-size:12px;flex-shrink:0}
-  .row .f{flex:1}
-  /* 输入框行内 + 右侧 🎲 随机按钮（v1.5.18） */
-  .field-inline{display:flex;gap:6px;align-items:center}
-  .field-inline input,.field-inline select{flex:1;min-width:0}
-  .field-inline .dice{flex-shrink:0;padding:7px 10px;line-height:1}
-  /* 服务卡操作行（应用/启停/重启/装卸/检测 一行，移动端自动换行） */
-  .ops-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
-  .node-card{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
-  .node-card .info{flex:1;min-width:240px}
-  .node-card .qr{width:150px;text-align:center}
-  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--card2);border:1px solid var(--bd);padding:10px 18px;border-radius:8px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,.4);display:none}
-  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:200}
-  .overlay .box{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:30px;text-align:center;max-width:420px;box-shadow:0 12px 40px rgba(0,0,0,.3)}
-  .overlay .box h2{margin-bottom:10px}
-  .overlay .count{font-size:48px;font-weight:700;color:var(--acc);margin:14px 0}
-  .help{font-size:11px;color:var(--mut);margin-top:6px}
-  .tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--card2);color:var(--mut)}
-  code{color:var(--txt);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-  /* 日志区：始终深底浅字（日志终端风格，双主题统一） */
-  .logs{background:#0a0e12;border:1px solid var(--bd);border-radius:6px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;max-height:480px;overflow:auto;white-space:pre-wrap;color:#9fb3c8}
-  /* ===== 响应式（必须置于所有基础规则之后，否则同特异性会被后面的基础规则覆盖） ===== */
-  @media(max-width:760px){
-    html,body{-webkit-text-size-adjust:100%}
-    .topbar{padding:8px 12px;flex-wrap:wrap;gap:6px}
-    .topbar .brand{font-size:14px}
-    .menu-btn{display:inline-block}
-    .main-wrap{position:relative}
-    /* 移动端：侧边栏变抽屉，默认收起 */
-    .sidebar{position:fixed;top:0;left:0;bottom:0;width:220px;z-index:40;transform:translateX(-100%);transition:transform .22s ease;box-shadow:2px 0 12px rgba(0,0,0,.3)}
-    .sidebar.open{transform:translateX(0)}
-    .sidebar.collapsed{width:220px}
-    .sidebar.collapsed .nav button .label,.sidebar.collapsed .collapse-btn .lbl{display:inline}
-    .sidebar.collapsed .nav button{justify-content:flex-start;padding:9px 12px}
-    .sidebar-overlay.show{display:block}
-    .collapse-btn{display:none}
-    .content{padding:12px 10px;max-width:100%}
-    .row{flex-wrap:wrap}
-    .row label{flex:1 0 100%;margin-bottom:4px}
-    .row>button{margin-top:6px}
-  }
-  @media(max-width:560px){
-    body{font-size:13px}
-    .card{padding:12px}
-    .login-box{width:100%}
-    .stat{padding:10px}
-    .stat .val{font-size:15px}
-    .grid{gap:8px}
-    table{font-size:12px}
-    td,th{padding:6px}
-    button{padding:8px 12px}
-    .node-card .info{min-width:100%}
-    .node-card .qr{width:100%;margin-top:12px}
-    .node-card .qr>div{display:flex;justify-content:center}
-    .node-card .qr .help{text-align:center}
-    .uri-box{font-size:11px}
-    .overlay .box{padding:20px;margin:0 12px}
-  }
+:root{--bg:#101314;--surface:#181c1e;--raised:#202628;--line:#30383b;--text:#eef2f2;--muted:#a1afb3;--accent:#84d9c2;--accent-ink:#102c24;--good:#85dcb6;--bad:#ff9c9c;--warn:#ebc17d;--shadow:0 12px 35px #0002;--r:12px;--r-sm:7px;--r-lg:16px;--space-sm:8px;--space-md:16px;--space:20px;--side:224px;--font:"Avenir Next","PingFang SC","Microsoft YaHei",sans-serif;--mono:"SFMono-Regular",Consolas,monospace;color-scheme:dark}
+[data-theme="light"]{--bg:#f3f5f4;--surface:#fff;--raised:#eef2f0;--line:#d6dfdb;--text:#192723;--muted:#52675f;--accent:#146c56;--accent-ink:#fff;--good:#156443;--bad:#ad2929;--warn:#875811;--shadow:0 12px 35px #203b2c08;color-scheme:light}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 95% 0%,#72bf9d08,transparent 45%),var(--bg);color:var(--text);font:14px/1.6 var(--font)}[hidden]{display:none!important}button,input,select{font:inherit}button,summary{cursor:pointer}button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:7px 12px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface);color:var(--text);transition:background .15s,border-color .15s}button:hover{background:var(--raised);border-color:var(--muted)}button.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;font-weight:650}button.danger{color:var(--bad)}button.quiet{background:transparent;border-color:transparent;color:var(--muted)}button:disabled{cursor:default;opacity:.5}button[aria-busy="true"]{cursor:wait}button[aria-busy="true"]:before{content:"";width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}input,select{width:100%;min-height:40px;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-sm);padding:8px 11px;color:var(--text)}input[type="checkbox"]{width:18px;min-height:18px;accent-color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}svg{width:18px;height:18px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}h1,h2,h3,p{margin:0}h1{font-size:28px;letter-spacing:-1px;font-weight:650}h2{font-size:17px}h3{font-size:14px}code,pre,.mono{font-family:var(--mono)}.muted,.help{color:var(--muted)}.help{font-size:12px;line-height:1.8}.stack{display:flex;flex-direction:column;gap:var(--space-md)}.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.between{justify-content:space-between}.actions{display:flex;gap:var(--space-sm);flex-wrap:wrap;align-items:center}.actions.end{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-md)}.grid.four{grid-template-columns:repeat(4,minmax(0,1fr))}.badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;line-height:1.5;padding:4px 8px;border:1px solid var(--line);border-radius:5px;color:var(--muted);background:var(--raised)}.good{color:var(--good)}.warning{color:var(--warn)}.bad{color:var(--bad)}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--muted)}.dot.good{background:var(--good);box-shadow:0 0 0 3px #80c9a814}.dot.bad{background:var(--bad)}.notice{border:1px solid var(--line);border-left:3px solid var(--accent);padding:13px 16px;border-radius:var(--r-sm);background:var(--surface);font-size:13px;overflow-wrap:anywhere}.notice.warning{border-left-color:var(--warn)}
+#login{min-height:100vh;display:grid;place-items:center;padding:24px}.login-box{width:min(100%,390px);padding:34px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow)}.login-box h1{font-size:25px;margin:22px 0 6px}.login-box form{margin:26px 0 20px}.brand-mark{display:grid;place-items:center;width:33px;height:33px;background:var(--accent);color:var(--accent-ink);border-radius:9px;font:bold 18px var(--font)}.login-box button.primary{width:100%}.field{display:flex;flex-direction:column;gap:7px;min-width:0}.field>span{font-size:12px;color:var(--muted)}.field-wrap{display:flex;align-items:center;gap:7px}.field-wrap>input{min-width:0}.field-wrap button{min-height:40px}.field-wrap button svg{width:16px}.error-line{min-height:23px;color:var(--bad);font-size:12px}
+#app{min-height:100vh}.sidebar{width:var(--side);position:fixed;inset:0 auto 0 0;border-right:1px solid var(--line);background:var(--surface);display:flex;flex-direction:column;padding:24px 14px 16px;z-index:40;transition:width .18s,transform .18s}.brand{display:flex;align-items:center;gap:11px;padding:0 10px 28px;font-size:16px;font-weight:700;white-space:nowrap}.brand small{font-size:10px;color:var(--muted);font-weight:400;letter-spacing:1.6px;display:block}.nav-label{font-size:10px;color:var(--muted);letter-spacing:1.8px;padding:14px 12px 10px}.nav{display:flex;flex-direction:column;gap:5px;flex:1}.nav button{justify-content:flex-start;text-align:left;gap:12px;border:0;background:transparent;color:var(--muted);padding:11px 13px;white-space:nowrap}.nav button:hover{background:var(--raised);color:var(--text)}.nav button.active{color:var(--accent);background:var(--raised)}.side-footer{display:flex;flex-direction:column;gap:12px;padding:16px 8px 0;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}.side-footer button{justify-content:flex-start}.version{overflow-wrap:anywhere}.sidebar.collapsed{--side:76px;width:76px}.sidebar.collapsed .nav-text,.sidebar.collapsed .brand-name,.sidebar.collapsed .nav-label{display:none}.sidebar.collapsed .brand{padding-left:7px}.sidebar.collapsed .nav button{justify-content:center;padding:12px}.sidebar.collapsed .side-footer{padding:14px 0 0;text-align:center;font-size:9px}.sidebar.collapsed .side-footer button{justify-content:center}.workspace{margin-left:var(--side);transition:margin-left .18s}body.narrow .workspace{--side:76px}.topbar{height:66px;padding:0 34px;border-bottom:1px solid var(--line);background:var(--bg);display:flex;align-items:center;justify-content:space-between;gap:10px;position:sticky;top:0;z-index:25}.breadcrumb{font-size:12px;display:flex;align-items:center;gap:12px;color:var(--muted)}.breadcrumb strong{color:var(--text);font-weight:500}.top-actions{display:flex;align-items:center;gap:8px;font-size:12px}.mobile-menu{display:none}.content{max-width:1220px;margin:auto;padding:38px 34px 70px;min-width:0}.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:28px}.eyebrow{font:10px var(--mono);letter-spacing:2px;color:var(--accent);margin-bottom:8px}.page-head p{color:var(--muted);font-size:13px;margin-top:8px}.fold-tools{display:flex;gap:0;margin-top:8px;flex-shrink:0}.fold-tools button{font-size:11px;padding:5px 8px}.sections{display:flex;flex-direction:column;gap:14px;animation:appear .2s ease}.panel{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);min-width:0;overflow:hidden}.panel>summary{list-style:none;display:flex;align-items:center;gap:13px;padding:18px 20px;min-height:74px}.panel>summary::-webkit-details-marker{display:none}.panel>summary:after{content:"";width:6px;height:6px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(-45deg);margin-left:5px;flex-shrink:0}.panel[open]>summary:after{transform:rotate(45deg) translate(-2px,-2px)}.panel-title{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}.panel-title strong{font-size:14px;font-weight:600;overflow-wrap:anywhere}.panel-title small{color:var(--muted);font-size:11px;overflow-wrap:anywhere}.panel-icon{display:grid;place-items:center;width:34px;height:34px;flex-shrink:0;background:var(--raised);border-radius:8px;color:var(--muted)}.panel-body{border-top:1px solid var(--line);padding:var(--space)}.dirty{color:var(--warn);font-size:11px;white-space:nowrap}.stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:20px;min-width:0}.stat-label{font-size:11px;color:var(--muted);margin-bottom:12px}.stat-value{font-size:26px;font-weight:600;letter-spacing:-.7px;line-height:1.2;overflow-wrap:anywhere}.stat small{display:block;margin-top:9px;font:11px var(--mono);color:var(--muted)}.meter{height:4px;background:var(--line);border-radius:5px;margin-top:17px;overflow:hidden}.meter>span{display:block;height:100%;background:var(--accent)}.data-list{margin:0;display:grid;grid-template-columns:140px minmax(0,1fr);font-size:13px}.data-list dt,.data-list dd{margin:0;padding:10px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.data-list dt{color:var(--muted)}.data-list dd{display:flex;align-items:center;justify-content:space-between;gap:10px}.data-list dd code{overflow-wrap:anywhere;min-width:0}.copy-btn{padding:4px;min-height:28px;flex-shrink:0}.segment{display:flex;gap:4px;padding:4px;border:1px solid var(--line);border-radius:8px;width:fit-content;background:var(--bg);margin:14px 0}.segment button{border-color:transparent;min-width:100px;background:transparent;color:var(--muted)}.segment button[aria-pressed="true"]{background:var(--raised);color:var(--accent)}.logs,.uri-box{margin:0;padding:16px;background:var(--bg);border:1px solid var(--line);border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:12px/1.8 var(--mono);max-height:420px;overflow:auto}.uri-box{margin:16px 0 12px;color:var(--muted);max-height:160px}.diagnostic{margin-top:16px;padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}.diagnostic p{margin-top:8px;font-size:12px;overflow-wrap:anywhere}.empty{padding:40px 20px;text-align:center;color:var(--muted)}.loading{padding:36px;color:var(--muted)}.toast{position:fixed;right:24px;bottom:24px;max-width:min(520px,calc(100vw - 36px));padding:14px 18px;background:var(--raised);border:1px solid var(--line);border-radius:10px;z-index:150;box-shadow:var(--shadow);white-space:pre-wrap;overflow-wrap:anywhere}.overlay{position:fixed;inset:0;background:#0008;backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}.dialog{width:min(100%,500px);max-height:90vh;overflow:auto;padding:28px;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-lg);box-shadow:var(--shadow)}.dialog h2{margin-bottom:15px}.qr{display:flex;justify-content:center;background:#fff;width:232px;padding:16px;margin:20px auto;border-radius:8px}.qr img{max-width:100%}.count{font-size:40px;color:var(--accent);margin:18px 0}.drawer-backdrop{position:fixed;inset:0;background:#0007;z-index:35}.mobile-close{display:none}.full{grid-column:1/-1}
+@keyframes spin{to{transform:rotate(360deg)}}@keyframes appear{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:1000px){.grid.four{grid-template-columns:repeat(2,minmax(0,1fr))}.topbar{padding:0 24px}.content{padding:28px 24px 60px}.page-head{flex-wrap:wrap;gap:8px}.fold-tools{margin:0}}
+@media(max-width:760px){.sidebar,.sidebar.collapsed{width:245px;transform:translateX(-100%)}.sidebar.open{transform:translateX(0)}.sidebar.collapsed .nav-text,.sidebar.collapsed .brand-name,.sidebar.collapsed .nav-label{display:revert}.sidebar.collapsed .nav button{justify-content:flex-start}.sidebar.collapsed .brand{padding-left:10px}.sidebar.collapsed .side-footer{text-align:left;font-size:11px}.workspace,body.narrow .workspace{margin-left:0}.mobile-menu,.mobile-close{display:inline-flex}.desktop-collapse{display:none}.mobile-close{position:absolute;right:12px;top:20px}.topbar{padding:0 14px;height:60px}.breadcrumb>span{display:none}.top-actions{gap:3px}.top-actions button{padding:7px}.content{padding:26px 14px 50px}.page-head{margin-bottom:20px}h1{font-size:25px}.grid,.grid.four{grid-template-columns:minmax(0,1fr)}.panel>summary{padding:16px 14px;gap:10px}.panel-body{padding:16px 14px}.panel>summary>.badge{max-width:110px;overflow-wrap:anywhere;font-size:10px}.data-list{grid-template-columns:92px minmax(0,1fr)}.stat{padding:18px}.actions button{flex-grow:1}.dirty{max-width:60px;white-space:normal}.top-actions #topuser{max-width:80px;overflow:hidden;text-overflow:ellipsis}.dialog{padding:22px}.toast{right:18px;bottom:18px}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
-
-<!-- 登录页 -->
-<div id="login">
-  <div class="login-box card">
-    <h1>🔒 ANS-GO 管理面板</h1>
-    <div class="sub">请输入管理员账号</div>
-    <div class="row" style="margin-bottom:8px"><input id="lu" placeholder="用户名" autocomplete="username"></div>
-    <div class="row" style="margin-bottom:8px"><input id="lp" type="password" placeholder="密码" autocomplete="current-password"></div>
-    <button class="primary" onclick="doLogin()">登 录</button>
-    <div class="login-err" id="lerr"></div>
-    <div class="forgot">忘记密码？SSH 执行 <code>ansgo-admin panel-pass</code> 重置</div>
-  </div>
+<section id="login" aria-label="管理员登录">
+ <div class="login-box"><div class="brand-mark" aria-hidden="true">A</div><h1>管理你的连接。</h1><p class="muted">登录 ANS-GO 控制台</p>
+ <form id="loginForm" class="stack"><label class="field"><span>管理员账号</span><input id="lu" required autocomplete="username"></label><label class="field"><span>密码</span><input id="lp" type="password" required autocomplete="current-password"></label><button class="primary" type="submit" id="loginBtn">登录控制台</button><div class="error-line" id="lerr" role="alert"></div></form>
+ <p class="help">忘记密码？在服务器 SSH 执行<br><code>ansgo-admin panel-pass</code> 重置。</p></div>
+</section>
+<div id="app" hidden>
+ <aside class="sidebar" id="sidebar" aria-label="主导航"><div class="brand"><span class="brand-mark" aria-hidden="true">A</span><span class="brand-name">ANS-GO<small>SERVER CONSOLE</small></span></div><button class="quiet mobile-close" id="closeMenu" aria-label="关闭导航">关闭</button><div class="nav-label">WORKSPACE</div><nav class="nav" id="nav"></nav><div class="side-footer"><button class="quiet desktop-collapse" id="collapseBtn" aria-label="折叠导航" aria-expanded="true"></button><div class="version">ANS-GO <span id="verTag">v-</span></div></div></aside>
+ <div class="drawer-backdrop" id="sidebarOverlay" hidden></div>
+ <div class="workspace"><header class="topbar"><div class="breadcrumb"><button id="menuBtn" class="quiet mobile-menu" aria-label="打开导航" aria-expanded="false"></button><span>工作空间 /</span><strong id="crumb">仪表盘</strong></div><div class="top-actions"><span id="topuser"></span><span id="panelDot" class="dot" role="status" aria-label="面板状态加载中" title="面板状态加载中"></span><button id="themeBtn" class="quiet" aria-label="切换明暗主题"></button><button id="logoutBtn" class="quiet">退出</button></div></header><main class="content" id="content" tabindex="-1"></main></div>
 </div>
-
-<!-- 应用 -->
-<div id="app">
-  <div class="topbar">
-    <div class="topbar-left">
-      <button class="menu-btn" onclick="toggleSidebar()" title="菜单">☰</button>
-      <div class="brand">⚡ ANS-GO 管理面板</div>
-    </div>
-    <div><span class="mut" id="topuser"></span><span id="panelDot" class="dot unk" title="管理面板状态加载中…"></span><button id="themeBtn" onclick="toggleTheme()" title="切换主题">🌙</button> <button onclick="doLogout()">退出</button></div>
-  </div>
-  <div class="main-wrap">
-    <aside class="sidebar" id="sidebar">
-      <button class="collapse-btn" onclick="toggleCollapse()" title="折叠/展开"><span id="collapseIco">◀</span> <span class="lbl" id="collapseLbl">折叠</span></button>
-      <nav class="nav" id="nav">
-        <button data-t="dash" class="active" onclick="showTab('dash')"><span class="ico">📊</span><span class="label">仪表盘</span></button>
-        <button data-t="node" onclick="showTab('node')"><span class="ico">🌐</span><span class="label">节点信息</span></button>
-        <button data-t="mgmt" onclick="showTab('mgmt')"><span class="ico">🗂️</span><span class="label">服务管理</span></button>
-        <button data-t="landing" onclick="showTab('landing')"><span class="ico">🛬</span><span class="label">落地服务</span></button>
-        <button data-t="cert" onclick="showTab('cert')"><span class="ico">📜</span><span class="label">证书管理</span></button>
-        <button data-t="set" onclick="showTab('set')"><span class="ico">⚙️</span><span class="label">面板设置</span></button>
-        <button data-t="log" onclick="showTab('log')"><span class="ico">📃</span><span class="label">日志</span></button>
-      </nav>
-      <div class="side-footer" id="sideFooter">ANS-GO <span id="verTag">v-</span></div>
-    </aside>
-    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
-    <main class="content" id="content"></main>
-  </div>
-</div>
-
-<div class="toast" id="toast"></div>
-<div class="overlay" id="overlay"><div class="box" id="obox"></div></div>
-
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="overlay" id="overlay" hidden><div class="dialog" id="obox" role="dialog" aria-modal="true" aria-labelledby="dialogTitle" tabindex="-1"></div></div>
 <script>
+'use strict';
 const $=s=>document.querySelector(s);
-// fetch 封装：网络异常时也返回 {error} 而非抛出，避免调用处未 catch 导致「静默无反应」
-const api=async(p,o={})=>{try{const r=await fetch(p,Object.assign({credentials:'same-origin',headers:{'Content-Type':'application/json'}},o));const t=await r.text();let j;try{j=JSON.parse(t)}catch(e){j={error:t||('HTTP '+r.status)}}if(!r.ok&&!j.error)j.error='HTTP '+r.status;return j}catch(e){return {error:'请求失败: '+e.message}}};
-// 简易日志：任何未捕获异常都打到控制台 + toast，绝不静默
-window.addEventListener('error',e=>{console.error('[BV]',e.message,e);toast('脚本错误: '+e.message)});
-function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t._t);t._t=setTimeout(()=>t.style.display='none',2600)}
-function copy(t){navigator.clipboard.writeText(t).then(()=>toast('已复制到剪贴板'),()=>toast('复制失败'))}
-function dot(s){const c=s==='active'?'on':(s==='inactive'||s==='failed')?'off':'unk';return `<span class="dot ${c}"></span>${s}`}
-// v1.5.32: 节点信息基础名 + 浏览器标题（全局，登录/切页时同步，避免只在「保存设置」后才更新）
-function nodeBaseName(v){v=(v||'').trim();return (!v||v==='ANS-GO 管理面板')?'Manage':v}
-function panelDisplayTitle(v){return nodeBaseName(v)+'_ANS'}
-// 拉取一次设置并把 document.title 同步为 <节点信息>_ANS（后端已渲染，这里覆盖兼容缓存/SPA 切换场景）
-async function syncPanelTitle(){
-  try{const j=await api('api/settings');if(j&&!j.error&&j.panel_title!==undefined){document.title=panelDisplayTitle(j.panel_title)}}catch(e){}
+const state={tab:'dash',seq:0,authed:false,resume:false,forms:new Set(),landings:new Map(),services:new Map(),upgrading:false,upgradeTimer:null,upgradeLog:'',upgradeMessage:'尚未启动升级',dashboard:null,dashboardAt:0};
+const pages={dash:['仪表盘','OVERVIEW','连接、服务与服务器状态，一目了然。','grid'],node:['节点信息','CONNECTIONS','复制连接参数，或扫描二维码导入客户端。','globe'],mgmt:['服务管理','SERVICES','每个协议独立管理。展开卡片编辑配置与凭证。','server'],landing:['落地服务','ROUTING','独立的 AnyTLS 入站与远端出口，保留每套协议配置。','route'],cert:['证书管理','CERTIFICATES','配置证书来源，管理签发、续期与宿主同步。','shield'],system:['系统维护','MAINTENANCE','版本升级、资源预算与空间清理。','tool'],set:['面板设置','PREFERENCES','配置控制台、访问安全与网络入口。','settings'],log:['运行日志','LOGS','按服务查看最近日志，定位连接与配置问题。','terminal']};
+const serviceNames={anytls:'AnyTLS',naive:'NaiveProxy',ss:'Shadowsocks',socks:'SOCKS5'};
+const paths={grid:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',globe:'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0 M3 12h18 M12 3c5 5 5 13 0 18 M12 3c-5 5-5 13 0 18',server:'M3 4h18v6H3z M3 14h18v6H3z M7 7h.01 M7 17h.01',route:'M5 3v12a4 4 0 0 0 4 4h10 M15 15l4 4-4 4 M5 8h10a4 4 0 0 0 4-4',shield:'M12 3l8 3v6c0 5-8 9-8 9s-8-4-8-9V6z M8 12l3 3 5-6',tool:'M14 5a5 5 0 0 0 5 6l-9 9a3 3 0 0 1-4-4l9-9a5 5 0 0 0-1-2 M16 3l-1 4 3 2 4-1',settings:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M9 3h6l1 4 4 1 1 7-4 1-2 5H9l-1-4-4-1-1-7 4-1z',terminal:'M4 5h16v14H4z M7 9l3 3-3 3 M13 15h4',menu:'M4 6h16 M4 12h16 M4 18h16',chevron:'M14 5l-7 7 7 7',sun:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M12 2v2 M12 20v2 M2 12h2 M20 12h2 M5 5l1 1 M18 18l1 1 M5 19l1-1 M18 6l1-1',copy:'M8 8h12v13H8z M16 8V3H3v13h5',dice:'M4 4h16v16H4z M8 8h.01 M16 8h.01 M12 12h.01 M8 16h.01 M16 16h.01'};
+function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=String(text??'');return n}
+function icon(name){const n=document.createElementNS('http://www.w3.org/2000/svg','svg');n.setAttribute('viewBox','0 0 24 24');n.setAttribute('aria-hidden','true');const p=document.createElementNS(n.namespaceURI,'path');p.setAttribute('d',paths[name]||paths.server);n.append(p);return n}
+function button(label,fn,cls='',ico){const b=el('button',cls);b.type='button';if(ico)b.append(icon(ico));b.append(document.createTextNode(label));if(fn)b.addEventListener('click',()=>run(b,()=>fn(b)));return b}
+function note(text,kind=''){return el('div','notice '+kind,text)}
+function badge(text,kind=''){return el('span','badge '+kind,text)}
+function help(text){return el('p','help',text)}
+function stored(k,fallback){try{return localStorage.getItem(k)??fallback}catch{return fallback}}
+function remember(k,v){try{localStorage.setItem(k,v)}catch{}}
+function toast(message){const t=$('#toast');t.textContent=message;t.hidden=false;clearTimeout(t._timer);t._timer=setTimeout(()=>t.hidden=true,6500)}
+function errorText(j,status){const errors=Array.isArray(j.errors)?j.errors.filter(Boolean).join('；'):'';const details=j.results?Object.values(j.results).map(x=>x.error).filter(Boolean).join('；'):'';return [j.error||errors||details||j.msg||('操作失败'+(status?'（HTTP '+status+'）':'')),j.hint].filter(Boolean).join('\n')}
+async function api(path,options={}){
+ const {quiet=false,dataError=false,...opts}=options;
+ try{
+  const r=await fetch(path,{credentials:'same-origin',headers:{'Content-Type':'application/json'},...opts});
+  const text=await r.text();let j;try{j=JSON.parse(text)}catch{j=null}
+  if(r.status===401){showLogin(true);const e=new Error(path==='api/login'?(j?.error||'账号或密码错误'):'会话已过期，请重新登录；未保存内容暂留本页。');e.status=401;e.data=j;throw e}
+  if(!j||typeof j!=='object'||Array.isArray(j))throw new Error('服务器响应无效（HTTP '+r.status+'）');
+  if(!r.ok||j.ok===false||(j.error&&!dataError)||(Array.isArray(j.errors)&&j.errors.length)){const e=new Error(errorText(j,r.status));e.status=r.status;e.data=j;throw e}
+  return j;
+ }catch(e){if(!quiet)toast(e.message||'网络请求失败');throw e}
 }
-async function checkAuth(){
-  const j=await api('api/auth');
-  // v1.5.22: 侧栏底部显示面板版本号（来自后端 -ldflags 注入），方便核实升级是否生效
-  if(j.version){const vt=$('#verTag');if(vt)vt.textContent='v'+j.version}
-  if(j.authed){$('#topuser').textContent='👤 '+j.user;showApp();showTab('dash');refreshPanelDot();syncPanelTitle()}
-  else{$('#login').style.display='flex';$('#app').style.display='none';$('#lu').focus()}
+const post=(path,body={},opts={})=>api('api/'+path,{...opts,method:'POST',body:JSON.stringify(body)});
+async function run(b,fn){if(b.disabled||b.dataset.busy)return;b.dataset.busy='true';b.disabled=true;b.setAttribute('aria-busy','true');try{return await fn()}catch(e){if(!e.status)toast(e.message||'操作失败')}finally{delete b.dataset.busy;b.disabled=b===state.upgradeButton&&state.upgrading;b.removeAttribute('aria-busy')}}
+let fieldSequence=0;
+function field(label,value='',options={}){
+ const wrap=el('div','field'),input=el(options.choices?'select':'input'),caption=el('label','help',label);input.id=options.id||'field-'+(++fieldSequence);caption.htmlFor=input.id;wrap.append(caption);
+ if(options.choices)for(const [v,t] of options.choices){const o=el('option','',t);o.value=v;input.append(o)}else input.type=options.type||'text';
+ input.value=String(value??'');if(options.id)input.id=options.id;if(options.placeholder)input.placeholder=options.placeholder;
+ if(options.type==='number'){input.min=options.min??1;input.max=options.max??65535;input.step=1}
+ if(options.maxLength)input.maxLength=options.maxLength;if(options.type==='password')input.autocomplete='new-password';
+ const line=el('div','field-wrap');line.append(input);wrap.append(line);if(options.help)wrap.append(help(options.help));return {wrap,input,line};
 }
-async function doLogin(){
-  const u=$('#lu').value.trim(),p=$('#lp').value;
-  $('#lerr').textContent='登录中…';
-  $('#lerr').style.color='var(--mut)';
-  try{
-    const j=await api('api/login',{method:'POST',body:JSON.stringify({user:u,pass:p})});
-    $('#lerr').style.color='var(--err)';
-    if(j.ok){$('#topuser').textContent='👤 '+(u||'admin');showApp();showTab('dash');syncPanelTitle()}
-    else $('#lerr').textContent=j.error||'登录失败';
-  }catch(e){$('#lerr').style.color='var(--err)';$('#lerr').textContent='登录异常: '+e.message;console.error(e)}
+function randomize(f,fn){const b=button('',()=>{f.input.value=fn();f.input.dispatchEvent(new Event('input',{bubbles:true}));f.input.focus();toast('已生成随机值，保存后生效')},'quiet','dice');b.title='随机生成，不自动保存';b.setAttribute('aria-label','随机生成');f.line.append(b)}
+function randString(n=20){const a='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789',b=crypto.getRandomValues(new Uint8Array(n));return Array.from(b,x=>a[x%a.length]).join('')}
+function randKey(method){const n=/aes-128/.test(method)?16:32;return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(n))))}
+function validPort(value){const n=Number(value);if(!Number.isInteger(n)||n<1||n>65535)throw new Error('端口必须为 1–65535 的整数');return n}
+function fold(key,title,subtitle='',options={}){
+ const d=el('details','panel');d.dataset.fold=key;d.open=stored('ansgo_fold:'+key,options.open?'open':'closed')==='open';
+ const summary=el('summary'),titleWrap=el('span','panel-title'),name=el('strong','',title),sub=el('small','',subtitle),mark=el('span','dirty','未保存修改');mark.hidden=true;titleWrap.append(name,sub);
+ const ico=el('span','panel-icon');ico.append(icon(options.icon||'server'));summary.append(ico,titleWrap,mark);if(options.badge)summary.append(options.badge);
+ const body=el('div','panel-body');d.append(summary,body);d.addEventListener('toggle',()=>remember('ansgo_fold:'+key,d.open?'open':'closed'));
+ return {root:d,body,summary,name,sub,mark};
 }
-async function doLogout(){await api('api/logout',{method:'POST'});location.reload()}
-function showApp(){$('#login').style.display='none';$('#app').style.display='flex'}
-// v1.5.20: 刷新顶栏管理面板状态圆点（绿=运行中/红=未运行/灰=获取失败），title 显示状态+端口
-// 仅登录后 app 可见时执行；fire-and-forget，失败不阻塞调用方
-async function refreshPanelDot(){
-  const el=$('#panelDot');
-  if(!el)return;
-  const j=await api('api/dashboard');
-  if(j.error){el.className='dot unk';el.title='管理面板状态获取失败';return}
-  const active=(j.services||{}).panel==='active';
-  el.className='dot '+(active?'on':'off');
-  el.title='管理面板：'+(active?'运行中':'未运行')+' :'+(j.ports||{}).panel;
+function watchForm(root,inputs,mark){const values=()=>Object.fromEntries(Object.entries(inputs).map(([k,i])=>[k,i.type==='checkbox'?i.checked:i.value]));const form={root,inputs,initial:values(),busy:false,dirty(){return JSON.stringify(values())!==JSON.stringify(this.initial)},accept(){this.initial=values();if(mark)mark.hidden=true},update(){if(mark)mark.hidden=!this.dirty()}};for(const i of Object.values(inputs)){i.addEventListener('input',()=>form.update());i.addEventListener('change',()=>form.update())}state.forms.add(form);return form}
+function dirtyForms(){return [...state.forms].some(f=>f.root.isConnected&&f.dirty())}
+function busyForms(){return [...state.forms].some(f=>f.root.isConnected&&f.busy)}
+async function formAction(form,fn){if(form.busy)return;form.busy=true;const controls=[...form.root.querySelectorAll('button,input,select')],disabled=controls.map(c=>c.disabled);controls.forEach(c=>c.disabled=true);try{return await fn()}finally{controls.forEach((c,i)=>c.disabled=disabled[i]);form.busy=false}}
+function dataList(rows,copyable=false){const dl=el('dl','data-list');for(const [label,value] of rows){if(value===undefined||value===null||value==='')continue;const dd=el('dd');dd.append(el('code','',value));if(copyable){const b=button('',()=>copy(String(value)),'copy-btn quiet','copy');b.setAttribute('aria-label','复制'+label);dd.append(b)}dl.append(el('dt','',label),dd)}return dl}
+async function copy(text){try{await navigator.clipboard.writeText(text);toast('已复制到剪贴板')}catch{toast('复制失败，请手动选择文本复制')}}
+function certDetails(c={}){return c.error?note(c.error,'warning'):dataList([['证书域名',c.subject],['签发机构',c.issuer_org||c.issuer],['生效日期',c.not_before],['到期日期',c.not_after],['剩余天数',c.days_left==null?'未知':c.days_left+' 天']])}
+function serviceStatus(enabled,active){return !enabled?badge('未安装'):active==='active'?badge('运行中','good'):badge(active==='failed'?'运行异常':'已停止',active==='failed'?'bad':'warning')}
+function pageShell(tab){const info=pages[tab],head=el('div','page-head'),text=el('div');text.append(el('div','eyebrow',info[1]),el('h1','',info[0]),el('p','',info[2]));const tools=el('div','fold-tools');for(const [label,open] of [['全部展开',true],['全部收起',false]])tools.append(button(label,()=>{for(const d of $('#content').querySelectorAll('details[data-fold]')){d.open=open;remember('ansgo_fold:'+d.dataset.fold,open?'open':'closed')}},'quiet'));head.append(text,tools);const sections=el('div','sections');$('#content').replaceChildren(head,sections);return sections}
+function showLogin(expired=false){state.authed=false;state.seq++;state.resume=expired;$('#login').hidden=false;$('#app').hidden=true;if(!expired)$('#content').replaceChildren();$('#lerr').textContent=expired?'会话已过期，请重新登录。未保存内容会在登录后恢复。':'';$('#lp').value='';$('#lu').focus()}
+function panelDisplayTitle(v){v=String(v||'').trim();return (!v||v==='ANS-GO 管理面板'?'Manage':v)+'_ANS'}
+async function checkAuth(){try{const a=await api('api/auth');$('#verTag').textContent='v'+String(a.version||'-').replace(/^v/,'');if(!a.authed){showLogin();return}state.authed=true;$('#topuser').textContent=a.user||'admin';$('#login').hidden=true;$('#app').hidden=false;await showTab('dash',{force:true});api('api/settings').then(s=>document.title=panelDisplayTitle(s.panel_title)).catch(()=>{})}catch{showLogin()}}
+async function doLogin(){try{await post('login',{user:$('#lu').value.trim(),pass:$('#lp').value});const a=await api('api/auth');if(!a.authed)throw new Error('登录状态未生效，请检查 Cookie 设置');$('#topuser').textContent=a.user||$('#lu').value;$('#verTag').textContent='v'+String(a.version||'-').replace(/^v/,'');state.authed=true;$('#login').hidden=true;$('#app').hidden=false;$('#lp').value='';const resume=state.resume;state.resume=false;if(resume&&$('#content').querySelector('.sections')){refreshPanelDot();if(state.upgrading)pollUpgrade()}else await showTab(resume?state.tab:'dash',{force:true});api('api/settings').then(s=>document.title=panelDisplayTitle(s.panel_title)).catch(()=>{})}catch(e){$('#lerr').textContent=e.message}}
+const mobileMedia=window.matchMedia('(max-width:760px)');
+function syncDrawer(){const mobile=mobileMedia.matches,open=$('#sidebar').classList.contains('open');$('#sidebar').inert=mobile&&!open;$('#sidebarOverlay').hidden=!mobile||!open;$('#menuBtn').setAttribute('aria-expanded',String(mobile&&open))}
+function closeSidebar(){$('#sidebar').classList.remove('open');syncDrawer()}
+function toggleSidebar(){const open=$('#sidebar').classList.toggle('open');syncDrawer();if(open)$('#closeMenu').focus();else $('#menuBtn').focus()}
+function setCollapsed(v){$('#sidebar').classList.toggle('collapsed',v);document.body.classList.toggle('narrow',v);$('#collapseBtn').setAttribute('aria-expanded',String(!v));$('#collapseBtn').setAttribute('aria-label',v?'展开导航':'折叠导航');$('#collapseBtn').replaceChildren(icon('chevron'),el('span','nav-text',v?'展开导航':'折叠导航'))}
+function applyTheme(t){document.documentElement.setAttribute('data-theme',t);$('#themeBtn').replaceChildren(icon('sun'));$('#themeBtn').title=t==='light'?'切换深色主题':'切换浅色主题'}
+function toggleTheme(){const t=document.documentElement.getAttribute('data-theme')==='light'?'dark':'light';remember('ansgo_theme',t);applyTheme(t)}
+async function dashboard(){if(state.dashboard&&Date.now()-state.dashboardAt<3000)return state.dashboard;const d=await api('api/dashboard');state.dashboard=d;state.dashboardAt=Date.now();updatePanelDot(d);return d}
+function updatePanelDot(d){const active=d.services?.panel==='active',n=$('#panelDot');n.className='dot '+(active?'good':'bad');n.title='管理面板：'+(active?'运行中':'未运行')+' · :'+(d.ports?.panel||'');n.setAttribute('aria-label',n.title)}
+async function refreshPanelDot(){try{updatePanelDot(await dashboard())}catch{const n=$('#panelDot');n.className='dot';n.title='面板状态获取失败';n.setAttribute('aria-label',n.title)}}
+async function showTab(tab,options={}){
+ tab=({svc:'mgmt',install:'mgmt',port:'mgmt',key:'mgmt'})[tab]||tab;if(!pages[tab])tab='dash';
+ if(!options.force&&busyForms()){toast('配置正在应用，请完成后再切换页面');return}
+ if(!options.force&&dirtyForms()&&!confirm('有未保存修改，离开此页会放弃这些修改。继续？'))return;
+ state.tab=tab;const seq=++state.seq;closeSidebar();$('#crumb').textContent=pages[tab][0];for(const b of $('#nav').querySelectorAll('button')){b.classList.toggle('active',b.dataset.tab===tab);if(b.dataset.tab===tab)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')}
+ const target=$('#content');target.replaceChildren(el('div','loading','正在加载…'));state.forms.clear();state.landings.clear();state.services.clear();
+ try{
+  const result=await ({dash:async()=>({d:await dashboard()}),node:async()=>({n:await api('api/node')}),mgmt:async()=>{const [d,n]=await Promise.all([dashboard(),api('api/node')]);return {d,n}},landing:async()=>api('api/landings'),cert:async()=>{const [c,cfg]=await Promise.all([api('api/cert',{dataError:true}),api('api/cert/config')]);return {c,cfg}},set:async()=>api('api/settings'),log:async()=>({}),system:async()=>{const [info,settings,status]=await Promise.all([api('api/system/info'),api('api/settings'),api('api/system/upgrade-status')]);return {info,settings,status}}})[tab]();
+  if(seq!==state.seq||!state.authed)return;
+  const root=pageShell(tab);({dash:renderDash,node:renderNode,mgmt:renderMgmt,landing:renderLanding,cert:renderCert,set:renderSet,log:renderLog,system:renderSystem})[tab](root,result);target.focus({preventScroll:true});if(tab!=='dash'&&tab!=='mgmt')refreshPanelDot();
+ }catch(e){if(seq===state.seq){const root=pageShell(tab);root.append(note(e.message,'warning'),button('重试',()=>showTab(tab,{force:true})))}}
 }
-function showTab(t){document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.t===t));
-  ({dash:loadDash,node:loadNode,svc:loadSvc,mgmt:loadMgmt,install:loadInstall,port:loadPort,key:loadKey,landing:loadLanding,cert:loadCert,set:loadSet,log:loadLog}[t]||loadDash)();
-  closeSidebar();  // 移动端选页后收起抽屉（桌面端 no-op）
-  refreshPanelDot()  // v1.5.20: 切 tab 时静默刷新顶栏管理面板状态（fire-and-forget，不阻塞页面加载）
+const loadDash=()=>showTab('dash'),loadNode=()=>showTab('node'),loadMgmt=()=>showTab('mgmt'),loadLanding=()=>showTab('landing'),loadCert=()=>showTab('cert'),loadSet=()=>showTab('set'),loadLog=()=>showTab('log');
+function stat(label,value,sub){const s=el('div','stat');s.append(el('div','stat-label',label),el('div','stat-value',value),el('small','',sub));return s}
+function renderDash(root,{d}){
+ const mem=d.mem||{},percent=mem.total?Math.round(mem.used/mem.total*100):0,metrics=el('div','grid four'),overview=fold('dash.overview','服务器概况','内存 '+percent+'% · '+(d.tcp??'—')+' 个 TCP 连接',{open:true,icon:'grid'});metrics.append(stat('内存使用',percent+'%',Math.round((mem.used||0)/1024)+' / '+Math.round((mem.total||0)/1024)+' MB'),stat('系统负载',(d.load||[]).map(v=>Number(v).toFixed(2)).join(' / ')||'—','1 / 5 / 15 min'),stat('运行时长',Math.round(d.uptime||0)+' h','SYSTEM UPTIME'),stat('TCP 连接',d.tcp??'—','CURRENT CONNECTIONS'));overview.body.append(metrics);root.append(overview.root);
+ const services=fold('dash.services','代理服务','独立协议状态与连通性诊断',{open:true,icon:'server'}),grid=el('div','grid');for(const [key,title] of Object.entries(serviceNames)){const c=el('div','stat'),head=el('div','row between'),out=el('div');head.append(el('h3','',title),serviceStatus(d.svc_enabled?.[key],d.services?.[key]));c.append(head,help('监听端口 :'+(d.ports?.[key]||'—')),button('健康检测',()=>checkHealth(key,out),'quiet'),out);grid.append(c)}services.body.append(grid,help('远端 Shadowsocks 协议检测会通过远端出口访问公共连通性 URL。'));root.append(services.root);
+ const cert=fold('dash.cert','共享证书',d.cert?.days_left==null?'尚无有效证书':'剩余 '+d.cert.days_left+' 天',{icon:'shield'});cert.body.append(certDetails(d.cert));root.append(cert.root);
 }
-// 侧边栏：桌面端折叠/展开（记忆），移动端开关抽屉
-function isMobile(){return window.matchMedia('(max-width:760px)').matches}
-function toggleSidebar(){const s=$('#sidebar');s.classList.toggle('open');$('#sidebarOverlay').classList.toggle('show',s.classList.contains('open'))}
-function closeSidebar(){const s=$('#sidebar');s.classList.remove('open');$('#sidebarOverlay').classList.remove('show')}
-function toggleCollapse(){
-  if(isMobile())return;  // 移动端不折叠（走抽屉）
-  const s=$('#sidebar');s.classList.toggle('collapsed');
-  const c=s.classList.contains('collapsed');
-  $('#collapseIco').textContent=c?'▶':'◀';
-  $('#collapseLbl').textContent=c?'展开':'折叠';
-  localStorage.setItem('ansgo_sidebar',c?'collapsed':'expanded')
+function renderNode(root,{n}){
+ if(n.server_ip_hint)root.append(note(n.server_ip_hint,'warning'));let count=0;
+ function card(key,title,node,naive=false){if(!node?.enabled||!node.uri)return;count++;const addr=naive?(n.domain||node.host):(n.server_ip||node.host||n.domain),p=fold('node.'+key,title,addr+' · :'+node.port,{open:true,icon:'globe',badge:badge('已启用','good')});
+ p.body.append(dataList([['连接地址',addr],['端口',node.port],['加密方式',node.method],['用户名',node.user],['密码 / 密钥',node.password||node.pass],['SNI',node.sni],['出口',node.via]],true),el('pre','uri-box',node.uri));const ops=el('div','actions');ops.append(button('复制 URI',()=>copy(node.uri),'primary','copy'),button('二维码',()=>showQR(title,node.uri)));p.body.append(ops);root.append(p.root)}
+ for(const [key,title] of Object.entries(serviceNames))card(key,title,n[key],key==='naive');for(const l of n.landings||[])card('landing.'+l.id,'落地 · '+l.name,l);if(!count)root.append(note('暂无已启用节点，请到服务管理或落地服务页安装。'));
 }
-
-// 仪表盘
-async function loadDash(){
-  $('#content').innerHTML='<div class="mut">加载中…</div>';
-  const j=await api('api/dashboard');
-  if(j.error)return $('#content').innerHTML='<div class="card">'+j.error+'</div>';
-  const cert=j.cert||{};
-  const memPct=j.mem.total?Math.round(j.mem.used/j.mem.total*100):0;
-  // 服务状态卡（带检测按钮）
-  const svcCard=(label,key,portTarget)=>`<div class="stat">
-     <div class="lbl">${label}</div>
-     <div class="val" style="font-size:14px">${dot(j.services[key])}</div>
-     <div class="sub">:${j.ports[key]||''}</div>
-     <button class="mut" style="margin-top:6px;font-size:11px;padding:4px 10px" onclick="checkHealth('${portTarget}',this)">🔍 检测</button>
-     <div id="health-${portTarget}"></div></div>`;
-  $('#content').innerHTML=`
-   <div class="grid g4">
-     ${svcCard('AnyTLS','anytls','anytls')}
-     ${svcCard('NaiveProxy','naive','naive')}
-     ${svcCard('Shadowsocks','ss','ss')}
-     ${svcCard('SOCKS5','socks','socks')}
-   </div>
-   <div class="grid g4" style="margin-top:12px">
-     <div class="stat"><div class="lbl">内存占用</div><div class="val">${memPct}%</div><div class="sub">${Math.round(j.mem.used/1024)} / ${Math.round(j.mem.total/1024)} MB</div></div>
-     <div class="stat"><div class="lbl">系统负载</div><div class="val">${(j.load||[]).map(x=>x.toFixed(2)).join(' ')}</div></div>
-     <div class="stat"><div class="lbl">运行时长</div><div class="val">${Math.round(j.uptime)}h</div></div>
-     <div class="stat"><div class="lbl">TCP 连接</div><div class="val">${j.tcp}</div></div>
-   </div>
-   <div class="card"><h3>📜 证书状态</h3>
-     <table><tr><th>域名</th><td>${cert.subject||'-'}</td></tr>
-     <tr><th>签发机构</th><td>${cert.issuer_org||cert.issuer||'-'}</td></tr>
-     <tr><th>有效期</th><td>${cert.not_before||'-'} ~ ${cert.not_after||'-'}</td></tr>
-     <tr><th>剩余天数</th><td><b style="color:${cert.days_left<14?'var(--err)':'var(--ok)'}">${cert.days_left??'-'}</b> 天</td></tr></table>
-   </div>`;
+let modalReturn=null,modalLocked=false;
+function openModal(title,locked=false){modalReturn=document.activeElement;modalLocked=locked;const box=$('#obox');box.replaceChildren();const h=el('h2','',title);h.id='dialogTitle';box.append(h);$('#overlay').hidden=false;box.focus();return box}
+function closeOverlay(){if(modalLocked)return;$('#overlay').hidden=true;if(modalReturn?.isConnected)modalReturn.focus()}
+function showQR(title,uri){const box=openModal(title+' · 客户端二维码'),qr=el('div','qr');box.append(qr,el('pre','uri-box',uri));const ops=el('div','actions');ops.append(button('复制 URI',()=>copy(uri),'primary'),button('关闭',closeOverlay));box.append(ops);try{new QRCode(qr,{text:uri,width:200,height:200})}catch{qr.replaceChildren(help('URI 过长，无法生成二维码，请复制导入。'))}}
+function safeDestination(url){const u=new URL(url,location.href);if(!['http:','https:'].includes(u.protocol))throw new Error('服务器返回了无效跳转地址');return u.href}
+function showRestartOverlay(msg,url,sec=3){const destination=safeDestination(url),box=openModal('正在重启面板',true),count=el('div','count',sec);box.append(help(msg),count,button('前往新地址',()=>location.href=destination,'primary'));let n=Number(sec)||3;const timer=setInterval(()=>{count.textContent=String(--n);if(n<=0){clearInterval(timer);location.href=destination}},1000)}
+function handleRestart(j){if(j.restart_in||j.new_url){showRestartOverlay(j.msg||'配置已保存，正在重新连接',j.new_url||location.href,j.restart_in||3);return true}return false}
+async function checkHealth(target,out){const seq=state.seq,j=await post('health',{target});if(seq!==state.seq||!out.isConnected)return;const good=j.enabled&&j.active==='active'&&j.port_listening==='yes'&&j.tcp_connect==='yes'&&(!j.landing_remote||['yes','skip'].includes(j.landing_remote)),box=el('div','diagnostic');box.append(badge(good?'服务健康':'需要关注',good?'good':'warning'),el('p','',j.summary||'诊断已完成'),dataList([['进程',(j.unit||'')+' · '+(j.active||'未知')],['端口监听',':'+(j.port||'—')+' · '+(j.port_listening||'未知')],['TCP 握手',(j.tcp_connect||'未知')+' · '+(j.tcp_ms||0)+' ms'],['远端出口',j.landing_remote==='skip'?'未启用远端出口，当前走 direct 直连':j.landing_remote?((j.landing_remote_protocol||'')+' '+(j.landing_remote_addr||'')+' · '+j.landing_remote+' · '+(j.landing_remote_ms||0)+' ms'):null],['远端说明',j.landing_remote_reason]]));
+ if(j.time_diag){const t=j.time_diag;box.append(el('p','help','服务器时间：'+t.now_local+' / UTC '+t.now_utc+' / '+t.timezone+' '+(t.offset||'')+' / NTP '+t.ntp_synchronized),help(t.ntp_synchronized==='host'?'Docker 共享宿主时间，NTP 请在宿主机检查。':'Shadowsocks 2022 依赖系统时间同步；时区只影响显示。'));if(t.detail)box.append(help(t.detail))}if(j.landing_remote_protocol==='ss')box.append(help('本次协议探测通过远端出口访问公共连通性 URL。'));out.replaceChildren(box);
 }
-
-// 节点信息（v1.5.12 重构：未启用的服务不显示；每条信息独立一行 + 复制按钮）
-async function loadNode(){
-  $('#content').innerHTML='<div class="mut">加载中…</div>';
-  const j=await api('api/node');
-  if(j.error)return $('#content').innerHTML=j.error;
-  const domain=j.domain||'';
-  const serverIp=j.server_ip||'';       // v1.5.18：连接地址优先显示服务器 IP，回退域名
-  const hint=j.server_ip_hint||'';      // v1.5.18：无法获取公网 IP 时的引导提示
-  // 单条信息行（label + 值 + 复制按钮）
-  // 注意：n.port 是 number、n.host 可能是 undefined，必须 String() 强转后再 .replace，
-  // 否则 (number).replace() 抛 TypeError 让整个 forEach 中断，content 卡在「加载中…」
-  const row=(label,val,copyVal)=>{
-    if(!val)return '';
-    const disp=String(val);
-    const cp=String(copyVal||val).replace(/`/g,'\\`');
-    return `<div class="row" style="margin-bottom:6px">
-      <label style="width:110px">${label}</label>
-      <div class="f"><code style="word-break:break-all">${disp}</code></div>
-      <button class="mut" style="flex-shrink:0;margin:0" onclick="copy(\`${cp}\`)">📋</button>
-    </div>`;
-  };
-  // 一张服务卡（含 URI + QR + 各字段行）
-  // v1.5.19：二维码默认隐藏，标题旁加「📱 二维码」按钮，点击弹出浮动展示，点空白关闭
-  // v1.5.37：连接地址——NaiveProxy 仍用域名（caddy 前置 TLS/SNI 依赖域名，客户端无法
-  //   用裸 IP 连 naive），其余服务优先 IP（server_ip > URI host > 域名）；
-  //   「📋 复制」与「📱 二维码」始终使用同一完整 URI（含 SNI/凭证，不随连接地址变化）
-  const card=(title,icon,n,extra='',useDomain=false)=>{
-    if(!n||!n.uri)return '';  // 未启用/无 URI 不渲染
-    const uriCp=n.uri.replace(/`/g,'\\`');
-    const addr=useDomain?(n.host||domain):(serverIp||n.host||domain);
-    return `<div class="card"><h3>${icon} ${title}
-        <button class="mut" style="margin-left:auto;font-size:12px;padding:4px 10px" onclick="showQR('${title}',\`${uriCp}\`)">📱 二维码</button>
-        ${extra}</h3>
-      ${row('连接地址',addr)}
-      ${row('端口',n.port)}
-      ${row('加密方式',n.method)}
-      ${row('密码/密钥',n.password)}
-      ${row('用户名',n.user)}
-      ${row('SNI',n.sni)}
-      <div style="border-top:1px solid var(--bd);margin:10px 0"></div>
-      <div class="row" style="margin-bottom:6px"><label style="width:110px">完整 URI</label>
-        <div class="f"><div class="uri-box">${n.uri}</div></div>
-        <button class="mut" style="flex-shrink:0;margin:0" onclick="copy(\`${uriCp}\`)">📋</button></div>
-      </div>`;
-  };
-  let html='';
-  // v1.5.18：无法自动获取公网 IP 时（VPC/NAT），顶部显示引导提示横幅
-  if(hint){
-    html+=`<div class="card" style="background:var(--warn-bg,rgba(255,193,7,.12));border-left:4px solid var(--warn,#ffc107)">
-      <div style="display:flex;gap:8px;align-items:center">
-        <span style="font-size:18px">⚠️</span>
-        <div><strong>连接地址暂无法显示公网 IP</strong><br><span style="font-size:12px;color:var(--mut)">${hint}</span></div>
-      </div></div>`;
-  }
-  // 第一组：按 enabled 过滤显示（v1.5.19 顺序：AnyTLS → NaiveProxy → Shadowsocks → SOCKS5）
-  // v1.5.37：NaiveProxy 连接地址仍用域名（useDomain），其余优先 IP
-  [['AnyTLS','🛡️',j.anytls],['NaiveProxy','🌀',j.naive],['Shadowsocks','🔐',j.ss],['SOCKS5','🧦',j.socks]].forEach(([t,i,n])=>{
-    if(n&&n.enabled&&n.uri){html+=card(t,i,n,'',t==='NaiveProxy')}
-  });
-  // v1.5.26 落地服务列表（替代旧 group2/anytls2 单条）：每个 enabled landing 渲染一张节点卡
-  const lands=(j.landings||[]).filter(x=>x.enabled&&x.uri);
-  if(lands.length){
-    const viaLabel={direct:'<span class="tag" style="background:var(--mut,#888);color:#fff">直连 direct</span>',
-      'ss-landing':'<span class="tag" style="background:var(--ok);color:#fff">出口经 SS 落地</span>',
-      'socks5-landing':'<span class="tag" style="background:var(--ok);color:#fff">出口经 SOCKS5 落地</span>'};
-    lands.forEach(L=>{
-      const extra=viaLabel[L.via]||viaLabel['direct'];
-      html+=card('🛬 落地-'+L.name,'🔀',L,extra);
-    });
-  }
-  if(!html)html='<div class="card"><div class="mut">当前未启用任何代理服务。请到「服务管理」页安装。</div></div>';
-  $('#content').innerHTML=html;
+function renderMgmt(root,{d,n}){
+ root.append(note('随机按钮仅填入新值。保存、启停与修复会中断对应服务的现有连接。未安装服务可先编辑参数，再安装。'));
+ for(const [key,title] of Object.entries(serviceNames))root.append(renderServiceCard(key,d,n).root);
+ const p=fold('mgmt.panel','管理面板','端口 :'+d.ports?.panel,{icon:'settings',badge:serviceStatus(true,d.services?.panel)}),f=field('面板端口',d.ports?.panel,{type:'number'}),out=el('div'),ops=el('div','actions end');p.body.append(f.wrap);const form=watchForm(p.root,{port:f.input},p.mark);
+ ops.append(button('应用并重启',()=>formAction(form,async()=>{const port=validPort(f.input.value);if(String(port)===String(form.initial.port)){toast('端口未变化');return}if(!confirm('修改面板端口会重启面板，继续？'))return;const j=await post('port',{target:'panel',port});form.accept();handleRestart(j)}),'primary'),button('健康检测',()=>checkHealth('panel',out)),button('重启面板',async()=>{if(!confirm('重启管理面板？'))return;await post('service',{target:'panel',action:'restart'});showRestartOverlay('面板正在重启',location.href,4)}),button('停止面板',async()=>{if(!confirm('停止后必须通过 SSH 执行 ansgo-admin restart panel 恢复，确认停止？'))return;await post('service',{target:'panel',action:'stop'});toast('面板已停止，请通过 SSH 恢复')},'danger'));p.body.append(ops,help('停止面板后，通过 SSH 执行 ansgo-admin restart panel 恢复。'),out);root.append(p.root);
 }
-
-// v1.5.19：二维码浮动展示（点击服务名旁「📱 二维码」按钮触发，点空白关闭）
-function showQR(title,uri){
-  const ov=$('#overlay');
-  $('#obox').innerHTML=`<h3>${title} 客户端二维码</h3>
-    <div id="qr-float" style="display:flex;justify-content:center;margin:14px 0"></div>
-    <div class="uri-box" style="max-width:340px;margin:0 auto;text-align:center">${uri}</div>
-    <div style="margin-top:14px"><button class="primary" onclick="copy(\`${uri.replace(/`/g,'\\`')}\`)">📋 复制 URI</button>
-    <button class="mut" style="margin-left:8px" onclick="closeOverlay()">关闭</button></div>`;
-  ov.style.display='flex';
-  // 渲染二维码（延迟到 DOM 插入后）
-  setTimeout(()=>{
-    const el=document.getElementById('qr-float');
-    if(el){el.innerHTML='';try{new QRCode(el,{text:uri,width:200,height:200})}catch(e){}}
-  },0);
+function renderServiceCard(key,d,n){
+ const v=n[key]||{},enabled=!!d.svc_enabled?.[key],active=d.services?.[key],port=d.ports?.[key],p=fold('service.'+key,serviceNames[key],serviceNames[key]+' · '+(enabled?(active==='active'?'运行中':'已停止'):'未安装')+' · :'+port,{badge:serviceStatus(enabled,active)}),grid=el('div','grid'),inputs={};
+ function add(name,label,value,options={}){const f=field(label,value,options);inputs[name]=f.input;grid.append(f.wrap);return f}
+ add('port','监听端口',port,{type:'number'});
+ if(key==='ss'){add('method','加密方式',v.method||'2022-blake3-aes-128-gcm');randomize(add('key','SS 密钥',v.password),()=>randKey(inputs.method.value))}
+ else if(key==='anytls')randomize(add('pass','AnyTLS 密码',v.password),()=>randString());
+ else{randomize(add('user','用户名',v.user),()=>randString(8));randomize(add('pass','密码',v.password||v.pass),()=>randString())}
+ const ops=el('div','actions end'),out=el('div');p.body.append(grid,ops,out);const form=watchForm(p.root,inputs,p.mark),entry={...p,form,key,enabled,inputs};state.services.set(key,entry);
+ ops.append(button(enabled?'保存修改':'保存参数并安装',()=>formAction(form,()=>saveService(entry,!enabled)),'primary'));
+ if(enabled){for(const [label,action] of [[active==='active'?'停止':'启动',active==='active'?'stop':'start'],['重启','restart']])ops.append(button(label,()=>formAction(form,async()=>{if(!confirm(label+' '+serviceNames[key]+'？现有连接可能中断。'))return;await post('service',{target:key,action});await refreshService(entry)})));
+ ops.append(button('健康检测',()=>checkHealth(key,out)),button('修复',()=>formAction(form,async()=>{if(!confirm('重新生成配置并重启服务？未保存的表单仍会保留。'))return;await post('repair',{target:key==='naive'?'caddy':'sing-box'});toast('配置已修复');await refreshService(entry)})),button('卸载',()=>formAction(form,async()=>{if(!confirm('卸载 '+serviceNames[key]+'？该服务将停止。'))return;await post('svc-install',{service:key,action:'uninstall'});await refreshService(entry)}),'danger'))}
+ return entry;
 }
-// 覆盖层关闭（点空白 / 点关闭按钮）
-function closeOverlay(){$('#overlay').style.display='none'}
+function credentials(entry){const body={target:entry.key};for(const [k,i] of Object.entries(entry.inputs))if(k!=='port')body[k]=i.value;return body}
+function validateCredentials(key,b){if(key==='naive'&&(/[\s{}#]/.test(b.user)||/[\s{}#]/.test(b.pass)))throw new Error('NaiveProxy 用户名和密码不能包含空白、# 或花括号');if(key==='socks'&&(/[:\s]/.test(b.user)||/[:\s]/.test(b.pass)))throw new Error('SOCKS5 用户名和密码不能包含冒号或空白');for(const [k,v] of Object.entries(b))if(k!=='target'&&!v.trim())throw new Error('请填写完整凭证，或使用随机按钮生成');if(key==='ss'&&b.method.startsWith('2022-')){let raw;try{raw=atob(b.key.replace(/-/g,'+').replace(/_/g,'/'))}catch{throw new Error('SS2022 密钥必须是有效 base64')}if(raw.length!==(/aes-128/.test(b.method)?16:32))throw new Error('SS2022 密钥长度与加密方式不符')};}
+async function saveService(entry,install=false){const {key,form,inputs}=entry,port=validPort(inputs.port.value),body=credentials(entry);validateCredentials(key,body);if(!confirm((install?'保存参数并安装 ':'保存修改并重启 ')+serviceNames[key]+'？'))return;
+ // 旧接口分别提交；每步成功即更新基线，重试只发送尚未成功的变更。
+ let changed=false;
+ if(String(port)!==String(form.initial.port)){await post('port',{target:key,port});form.initial.port=inputs.port.value;form.update();changed=true}
+ if(Object.entries(body).some(([k,v])=>k!=='target'&&v!==form.initial[k])){await post('key',body);for(const [k,v] of Object.entries(body))if(k!=='target')form.initial[k]=v;form.update();changed=true}
+ if(install){await post('svc-install',{service:key,action:'install'});changed=true}
+ form.accept();toast(changed?'参数已保存并应用':'没有需要保存的修改');if(changed)await refreshService(entry);
+}
+async function refreshService(entry){const seq=state.seq,[d,n]=await Promise.all([api('api/dashboard'),api('api/node')]);state.dashboard=d;state.dashboardAt=Date.now();updatePanelDot(d);if(seq!==state.seq||!entry.root.isConnected)return;
+ const values=Object.fromEntries(Object.entries(entry.inputs).map(([k,i])=>[k,i.value])),dirty=entry.form.dirty();state.forms.delete(entry.form);const next=renderServiceCard(entry.key,d,n);entry.root.replaceWith(next.root);if(dirty){for(const [k,v] of Object.entries(values))next.inputs[k].value=v;next.form.update()}}
+function landingData(l){const type=l.remote_type||'ss',legacy={host:l.remote_host||'',port:l.remote_port||0,password:l.remote_password||''};return {...l,id:String(l.id),remote_type:type,remote_ss:{host:'',port:0,method:'2022-blake3-aes-128-gcm',password:'',...(l.remote_ss||(type==='ss'?{...legacy,method:l.remote_method||'2022-blake3-aes-128-gcm'}:{}))},remote_socks:{host:'',port:0,user:'',password:'',...(l.remote_socks||(type==='socks'?{...legacy,user:l.remote_user||''}:{}))}}}
+function landingPayload(entry){const v=Object.fromEntries(Object.entries(entry.inputs).map(([k,i])=>[k,i.value]));return {id:entry.id,name:v.name,port:validPort(v.port),password:v.password,enabled:v.enabled==='true',remote_enabled:v.remote_enabled==='true',remote_type:entry.type,remote_ss:{host:v.ss_host,port:Number(v.ss_port)||0,method:v.ss_method,password:v.ss_password},remote_socks:{host:v.socks_host,port:Number(v.socks_port)||0,user:v.socks_user,password:v.socks_password}}}
+function renderLanding(root,data){
+ const create=fold('landing.create','新增落地服务','每个落地使用独立的端口、入站凭证与出口',{icon:'route'}),grid=el('div','grid'),name=field('落地名称','',{maxLength:64}),port=field('AnyTLS 入站端口','',{type:'number'});grid.append(name.wrap,port.wrap);const ops=el('div','actions end');create.body.append(grid,ops);const form=watchForm(create.root,{name:name.input,port:port.input},create.mark),list=el('div','stack'),empty=el('div','empty','暂无落地服务，展开上方栏目创建。');list.id='landingList';empty.hidden=!!data.landings?.length;root.append(create.root,note('远端关闭时使用 direct 直连出口。切换协议保留两套配置，只有选中的协议且启用远端时生效。'),list,empty);
+ ops.append(button('创建落地',()=>formAction(form,async()=>{const body={name:name.input.value.trim(),port:validPort(port.input.value)};if(!body.name)throw new Error('请填写落地名称');const j=await post('landings',body);if(!j.landing)throw new Error('创建响应缺少落地信息，请刷新页面核实');if(!list.isConnected)return;list.append(renderLandingCard(j.landing).root);name.input.value='';port.input.value='';form.accept();empty.hidden=true;toast('落地已创建')}),'primary'));
+ for(const l of data.landings||[])list.append(renderLandingCard(l).root);
+}
+function renderLandingCard(raw){
+ const l=landingData(raw),exit=l.remote_enabled?(l.remote_type==='socks'?'SOCKS5 远端':'SS 远端'):'direct 直连',p=fold('landing.'+l.id,l.name||'落地服务',String(l.enabled?'已启用':'已关闭')+' · :'+l.port,{icon:'route',badge:badge('当前生效出口：'+exit,l.remote_enabled?'good':'warning')}),inputs={},grid=el('div','grid');
+ function add(parent,k,label,value,options={}){const f=field(label,value,options);inputs[k]=f.input;parent.append(f.wrap);return f}
+ add(grid,'name','名称',l.name,{maxLength:64});add(grid,'port','AnyTLS 入站端口',l.port,{type:'number'});add(grid,'enabled','入站服务',String(!!l.enabled),{choices:[['true','启用'],['false','关闭']]});randomize(add(grid,'password','AnyTLS 密码',l.password),()=>randString());add(grid,'remote_enabled','远端出口',String(!!l.remote_enabled),{choices:[['false','关闭 · direct 直连'],['true','启用选中的远端协议']]});p.body.append(grid,help('上方徽章表示已保存的实际出口。修改开关或协议后，需保存才能生效。'));
+ const segment=el('div','segment');segment.setAttribute('role','group');segment.setAttribute('aria-label','远端协议');const ss=el('div','grid'),socks=el('div','grid'),entry={...p,id:l.id,inputs,type:l.remote_type,raw:l,ss,socks};
+ for(const [type,label] of [['ss','Shadowsocks'],['socks','SOCKS5']]){const b=button(label,()=>switchRemote(entry,type));b.dataset.type=type;segment.append(b)}entry.segment=segment;p.body.append(segment,ss,socks);
+ for(const [type,parent,obj] of [['ss',ss,l.remote_ss],['socks',socks,l.remote_socks]]){add(parent,type+'_host','远端地址',obj.host,{maxLength:256,placeholder:'your-domain.com'});add(parent,type+'_port','远端端口',obj.port||'',{type:'number'});if(type==='ss')add(parent,'ss_method','SS 加密方式',obj.method,{maxLength:256});else add(parent,'socks_user','SOCKS5 用户名',obj.user,{maxLength:256});add(parent,type+'_password',type==='ss'?'SS 密钥':'SOCKS5 密码',obj.password,{maxLength:256})}
+ const protocolInput=el('input');protocolInput.value=l.remote_type;inputs.remote_type=protocolInput;entry.form=watchForm(p.root,inputs,p.mark);switchRemote(entry,l.remote_type,false);
+ const ops=el('div','actions end'),out=el('div');ops.append(button('保存修改',()=>formAction(entry.form,()=>saveLanding(entry)),'primary'),button('重置凭证',()=>formAction(entry.form,()=>regenLanding(entry))),button('健康检测',()=>checkHealth('landing-'+entry.id,out)),button('删除',()=>formAction(entry.form,()=>deleteLanding(entry)),'danger'));p.body.append(ops,help('保存会校验配置并重启 sing-box。远端 SS 检测会访问公共连通性 URL。'),out);state.landings.set(l.id,entry);return entry;
+}
+function switchRemote(entry,type,changed=true){entry.type=type;entry.inputs.remote_type.value=type;entry.ss.hidden=type!=='ss';entry.socks.hidden=type!=='socks';for(const b of entry.segment.querySelectorAll('button'))b.setAttribute('aria-pressed',String(b.dataset.type===type));if(changed)entry.form.update()}
+function replaceLanding(entry,l){if(!entry.root.isConnected)return;state.forms.delete(entry.form);const next=renderLandingCard(l);entry.root.replaceWith(next.root);next.root.open=entry.root.open}
+async function saveLanding(entry){const body=landingPayload(entry);if(!body.name.trim())throw new Error('名称不能为空');if(!body.password.trim())throw new Error('入站密码不能为空');const seq=state.seq,j=await post('landings/update',body);if(!j.landing)throw new Error('保存响应缺少落地信息，请刷新核实');if(seq===state.seq)replaceLanding(entry,j.landing);toast('落地配置已保存，服务已应用')}
+async function regenLanding(entry){if(!confirm('重置此落地的入站凭证？旧密码将失效，其他未保存字段会保留。'))return;const seq=state.seq,j=await post('landings/regen',{id:entry.id});if(!j.landing)throw new Error('重置响应缺少落地信息，请刷新核实');if(seq!==state.seq||!entry.root.isConnected)return;
+ // 重置只合并新的入站凭证，连当前卡片的其他草稿也保留。
+ entry.inputs.password.value=j.landing.password||'';entry.form.initial.password=entry.inputs.password.value;entry.raw=landingData(j.landing);entry.form.update();toast('入站凭证已重置')}
+async function deleteLanding(entry){if(!confirm('删除「'+entry.raw.name+'」？凭证会一并清理，服务将重启。'))return;await post('landings/delete',{id:entry.id});if(!entry.root.isConnected)return;entry.root.remove();state.forms.delete(entry.form);state.landings.delete(entry.id);if(!state.landings.size)$('#landingList').nextElementSibling.hidden=false;toast('落地已删除')}
+function shq(s){return "'"+String(s??'').replace(/'/g,"'\\''")+"'"}
+function dockerManualSyncScript(full,key){return '#!/usr/bin/env bash\n'+
+ '# ANS-GO Docker 手动证书同步；在宿主机执行\n'+
+ 'set -uo pipefail\n'+
+ 'SRC_FULL='+shq(full)+'\nSRC_KEY='+shq(key)+'\n'+
+ 'DST_DIR=/etc/ansgo-docker/manual-certs\n'+
+ 'mkdir -p "$DST_DIR" || exit 1\n'+
+ 'exec 9>"$DST_DIR/.sync.lock"\nflock -n 9 || exit 0\n'+
+ '[ -s "$SRC_FULL" ] && [ -s "$SRC_KEY" ] || { echo "证书或私钥不存在或为空"; exit 1; }\n'+
+ 'install -m 0644 "$SRC_FULL" "$DST_DIR/fullchain.pem.tmp" || exit 1\n'+
+ 'install -m 0600 "$SRC_KEY" "$DST_DIR/privkey.pem.tmp" || exit 1\n'+
+ 'mv -f "$DST_DIR/fullchain.pem.tmp" "$DST_DIR/fullchain.pem" || exit 1\n'+
+ 'mv -f "$DST_DIR/privkey.pem.tmp" "$DST_DIR/privkey.pem" || exit 1\n'+
+ 'docker exec ansgo /usr/local/bin/ansgo-sync-manual-cert\nrc=$?\n'+
+ '[ "$rc" = 0 ] && { echo "证书未变化，无需重载"; exit 0; }\n'+
+ '[ "$rc" = 10 ] || { echo "同步失败，保留容器中的旧证书"; exit "$rc"; }\n'+
+ 'docker exec ansgo /usr/local/bin/ansgo-cert-reload\n';}
+function dockerManualCronInstallScript(full,key){let delimiter='ANSGO_SYNC_EOF';while((full+'\n'+key).includes(delimiter))delimiter+='_';return '#!/usr/bin/env bash\n# 系统定时同步：在 Docker 宿主机以 root 执行一次\nset -euo pipefail\n'+
+ 'cat > /usr/local/bin/ansgo-docker-sync-manual-cert <<\''+delimiter+'\'\n'+dockerManualSyncScript(full,key)+delimiter+'\n'+
+ 'chmod 0700 /usr/local/bin/ansgo-docker-sync-manual-cert\n'+
+ "cat > /etc/cron.d/ansgo-docker-manual-cert-sync <<'ANSGO_CRON_EOF'\n"+
+ 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'+
+ '*/15 * * * * root /bin/bash /usr/local/bin/ansgo-docker-sync-manual-cert >/var/log/ansgo-docker-sync-manual-cert.log 2>&1\n'+
+ 'ANSGO_CRON_EOF\nchmod 0644 /etc/cron.d/ansgo-docker-manual-cert-sync\n/bin/bash /usr/local/bin/ansgo-docker-sync-manual-cert\n';}
+function renderCert(root,{c,cfg}){
+ const overview=fold('cert.overview','证书状态',c.error?'证书需要关注':(c.subject||'共享 TLS 证书')+' · 剩余 '+(c.days_left??'未知')+' 天',{icon:'shield'});overview.body.append(certDetails(c));root.append(overview.root);
+ const source=fold('cert.source','证书来源',cfg.mode==='manual'?'手动证书':'ACME · Dynu DNS-01',{icon:'settings'}),mode=field('证书来源',cfg.mode||'acme',{id:'cert_mode',choices:[['acme','ACME 自动签发'],['manual','手动证书']]}),acme=el('div','stack'),manual=el('div','stack'),apiKey=field('Dynu API Key','',{type:'password',id:'dynu_api_key',placeholder:cfg.dynu?.has_api_key?'已配置，留空保留':'填写 Dynu API Key'}),email=field('注册邮箱',cfg.acme_email,{id:'acme_email',type:'email'}),grid=el('div','grid');grid.append(apiKey.wrap,email.wrap);
+ acme.append(help(cfg.dynu?.has_api_key?'API Key 已配置，留空保留现有凭证。':cfg.dynu?.has_oauth?'旧 OAuth 凭证兼容模式，签发续期仍可用；建议迁移到 API Key。':'尚未配置 Dynu 凭证，请填写 API Key 后保存。'),grid,help('DNS-01 签发约需 1–3 分钟。凭证不会经读取接口返回明文。'));
+ const full=field(cfg.docker_mode?'宿主证书路径':'证书文件路径',cfg.docker_mode?cfg.host_fullchain:cfg.fullchain,{id:'cert_fullchain',placeholder:'/etc/letsencrypt/live/your-domain.com/fullchain.pem'}),key=field(cfg.docker_mode?'宿主私钥路径':'私钥文件路径',cfg.docker_mode?cfg.host_privkey:cfg.privkey,{id:'cert_privkey',placeholder:'/etc/letsencrypt/live/your-domain.com/privkey.pem'}),manualGrid=el('div','grid');manualGrid.append(full.wrap,key.wrap);manual.append(help(cfg.docker_mode?'填写宿主机真实路径。证书经过固定同步目录 /etc/ansgo-docker/manual-certs 导入容器，需在宿主机执行下方同步脚本。':'填写服务器上的绝对路径。替换证书后请重新加载。'),manualGrid);if(cfg.docker_mode)manual.append(dataList([['运行证书',cfg.runtime_fullchain],['运行私钥',cfg.runtime_privkey]]));
+ source.body.append(mode.wrap,acme,manual);const ops=el('div','actions end'),pending=note('已切换证书来源，请先保存，随后才能签发、续期或重载。','warning');pending.id='cert_mode_pending';source.body.append(ops,pending);root.append(source.root);
+ const form=watchForm(source.root,{mode:mode.input,apiKey:apiKey.input,email:email.input,full:full.input,key:key.input},source.mark),actions=fold('cert.actions','证书操作','签发、续期与重新加载',{icon:'tool'}),acmeOps=el('div','actions'),manualOps=el('div','actions'),log=el('pre','logs');log.hidden=true;actions.body.append(acmeOps,manualOps,help('证书变更可能重启面板及代理服务，现有连接会中断。'),log);root.append(actions.root);
+ let savedMode=cfg.mode||'acme',scriptWrap=null;
+ if(cfg.docker_mode){scriptWrap=el('div','stack');scriptWrap.id='docker_sync_wrap';for(const [kind,title,make] of [['system','系统自动任务一键安装',dockerManualCronInstallScript],['bt','宝塔计划任务脚本',dockerManualSyncScript]]){const p=fold('cert.sync.'+kind,title,'在 Docker 宿主机执行 · 每 15 分钟同步',{icon:'terminal'}),code=el('pre','logs');code.id='docker_sync_'+kind;p.body.append(help(kind==='system'?'在宿主机以 root 执行一次，安装 cron 并立即同步。':'复制到宝塔「计划任务 → Shell 脚本」，周期设为每 15 分钟。'),code,button('复制脚本',()=>copy(code.textContent),'quiet','copy'));scriptWrap.append(p.root);const update=()=>code.textContent=make(full.input.value||'/etc/letsencrypt/live/your-domain.com/fullchain.pem',key.input.value||'/etc/letsencrypt/live/your-domain.com/privkey.pem');full.input.addEventListener('input',update);key.input.addEventListener('input',update);update()}root.append(scriptWrap)}
+ const certEntry={form,mode,acmeOps,manualOps,pending,cfg,log};state.cert=certEntry;
+ function sync(){const selected=mode.input.value,changed=selected!==savedMode;acme.hidden=selected!=='acme';manual.hidden=selected!=='manual';pending.hidden=!changed;acmeOps.hidden=changed||selected!=='acme';manualOps.hidden=changed||selected!=='manual';if(scriptWrap)scriptWrap.hidden=selected!=='manual';for(const b of [...acmeOps.querySelectorAll('button'),...manualOps.querySelectorAll('button')])b.disabled=changed}
+ mode.input.addEventListener('change',sync);
+ ops.append(button('保存来源设置',()=>formAction(form,async()=>{const selected=mode.input.value,body={mode:selected};if(selected==='acme'){if(apiKey.input.value.trim())body.dynu_api_key=apiKey.input.value.trim();body.acme_email=email.input.value.trim()}else if(cfg.docker_mode){body.host_fullchain=full.input.value;body.host_privkey=key.input.value}else{body.fullchain=full.input.value;body.privkey=key.input.value}if(!confirm('保存证书来源？相关服务及面板可能重启。'))return;const j=await post('cert/config',body);savedMode=selected;apiKey.input.value='';form.accept();source.sub.textContent=selected==='manual'?'手动证书':'ACME · Dynu DNS-01';sync();if(!handleRestart(j))toast('证书来源设置已保存')}),'primary'));
+ for(const [label,endpoint] of [['立即签发证书','issue'],['手动续期','renew']])acmeOps.append(button(label,()=>formAction(form,()=>certOperation(certEntry,endpoint)),endpoint==='issue'?'primary':''));manualOps.append(button(cfg.docker_mode?'同步并重新加载证书':'重新加载证书',()=>formAction(form,()=>certOperation(certEntry,'reload')),'primary'));sync();
+}
+async function certOperation(entry,operation){if(entry.mode.input.value!==(entry.form.initial.mode||'acme'))throw new Error('请先保存证书来源');if(!confirm(operation==='issue'?'通过 Dynu DNS-01 签发证书？约需 1–3 分钟。':'执行证书操作？相关服务可能重启。'))return;entry.log.hidden=false;entry.log.textContent='正在执行，请稍候…';try{const j=await post('cert/'+operation);entry.log.textContent=j.log||j.msg||'操作完成';if(j.cert)toast('证书操作完成，剩余 '+(j.cert.days_left??'未知')+' 天');else toast('证书操作完成');handleRestart(j)}catch(e){entry.log.textContent=e.data?.log||e.message;throw e}}
+function renderSet(root,s){
+ const groups=[['basic','基础设置','节点命名与访问入口',[['panel_title','节点信息','text'],['url_path','URL 路径','text'],['panel_port','面板端口','number']]],['security','安全设置','管理员、会话与登录保护',[['admin_user','管理员账号','text'],['admin_pass','新密码（留空不改）','password'],['session_hours','会话时长 / 小时','number'],['login_lock_threshold','锁定阈值 / 次','number'],['login_lock_minutes','锁定时长 / 分钟','number']]],['disguise','伪装设置','域名直访与 NaiveProxy 伪装',[...(s.caddy_enable==='true'?[['disguise_panel','直访伪装 :443','text']]:[]),['disguise_naive','NaiveProxy 伪装','text']]],['network','网络设置','公网入口与自动检测',[['server_ip','服务器公网 IP','text']]]],inputs={},panels=[];
+ for(const [key,title,sub,fields] of groups){const p=fold('settings.'+key,title,sub,{icon:'settings'}),grid=el('div','grid');for(const [name,label,type] of fields){const f=field(label,name==='admin_pass'?'':s[name],{type,id:'s_'+name});inputs[name]=f.input;grid.append(f.wrap);if(name==='server_ip')f.line.append(button('自动检测',async()=>{const j=await api('api/detect-public-ip');f.input.value=j.ip;f.input.dispatchEvent(new Event('input',{bubbles:true}));toast('已填入检测候选 IP，确认后保存生效')}))}p.body.append(grid);
+ if(key==='basic')p.body.append(help('节点信息用于浏览器标题 <节点信息>_ANS，以及 URI 名称 -AT / -NV / -SS / -SK；留空使用 Manage。修改路径或面板端口会重启面板。'));
+ if(key==='disguise')p.body.append(help('格式为 proxy:https://your-domain.com 或 page。'+(s.caddy_enable==='true'?'':'直访伪装已因 --no-caddy 禁用。')));
+ if(key==='network')p.body.append(help('首次留空时，面板在启动时自动查询公网出口 IP 并保存；已有值不覆盖。NAT / VPC 下出口不一定等于入口，请手动填写真实入口 IP。'),help('当前生效连接地址：'+(s.server_ip_resolved||s.server_ip||'域名回退')),...(s.server_ip_hint?[note(s.server_ip_hint,'warning')]:[]));root.append(p.root);panels.push(p)}
+ const form=watchForm(root,inputs),update=()=>{for(const p of panels)p.mark.hidden=![...p.body.querySelectorAll('input,select')].some(i=>i.value!==form.initial[Object.keys(inputs).find(k=>inputs[k]===i)])};for(const i of Object.values(inputs))i.addEventListener('input',update);
+ const ops=el('div','actions');ops.append(button('保存设置',()=>formAction(form,async()=>{const body={};for(const [k,i] of Object.entries(inputs)){if(k==='admin_pass'&&!i.value)continue;if(i.value===form.initial[k])continue;body[k]=i.type==='number'?Number(i.value):i.value;if(i.type==='number'&&(!Number.isInteger(body[k])||body[k]<1))throw new Error('数值配置必须为正整数')}if(!Object.keys(body).length){toast('没有需要保存的修改');return}const j=await post('settings',body);document.title=panelDisplayTitle(inputs.panel_title.value);inputs.admin_pass.value='';form.accept();update();if(!handleRestart(j))toast('设置已保存')}),'primary'));root.append(ops);
+}
+function renderLog(root){const p=fold('logs','服务日志','最近 200 行 · 手动刷新',{open:true,icon:'terminal'}),s=field('选择服务','naive',{choices:[['naive','NaiveProxy / Caddy'],['ss','Shadowsocks / AnyTLS / sing-box'],['socks','SOCKS5 / sing-box'],['panel','ANS-GO 面板']]}),box=el('pre','logs','请选择服务并刷新'),line=el('div','row');let request=0;const refresh=async()=>{const serial=++request,seq=state.seq,target=s.input.value,j=await api('api/logs?target='+encodeURIComponent(target)+'&n=200');if(serial===request&&seq===state.seq&&box.isConnected)box.textContent=j.logs||'暂无日志'};line.append(s.wrap,button('刷新日志',refresh,'primary'));s.input.addEventListener('change',()=>{box.textContent='点击刷新查看此服务日志';request++});p.body.append(line,box);root.append(p.root)}
+function bytes(v){const n=Number(v)||0;if(n<1024)return n+' B';const units=['KB','MB','GB','TB'];const i=Math.min(Math.floor(Math.log(n)/Math.log(1024))-1,3);return (n/1024**(i+1)).toFixed(i>0?1:0)+' '+units[i]}
+const hostUpgrade='curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh | bash';
+function systemResources(info){
+ const body=el('div','stack'),grid=el('div','grid four'),disk=info.disk||{},usage=info.usage||{};
+ grid.append(stat('当前版本',info.version||'未知',info.arch||'未知架构'),stat('部署形态',info.deploy_mode==='docker'?'Docker':'裸金属','DEPLOYMENT'),stat('物理内存',bytes((info.mem_total_kb||0)*1024),'TOTAL MEMORY'),stat('磁盘可用',bytes(disk.avail),bytes(disk.used)+' / '+bytes(disk.total)));
+ body.append(grid,dataList([['配置备份',bytes(usage.backups_bytes)+' · '+(usage.backups_count||0)+' 份'],['项目日志',bytes(usage.logs_bytes)],['Journal',bytes(usage.journal_bytes)],['临时探测文件',bytes(usage.probe_tmp_bytes)],['面板资源上限',info.limits?.panel_mem_max||'未报告'],['sing-box 上限',info.limits?.singbox_mem_max||'未报告'],['Caddy 上限',info.limits?.caddy_mem_max||'未报告']]));return body;
+}
+function renderSystem(root,{info,settings,status}){
+ const overview=fold('system.resources','系统资源',info.version+' · '+(info.deploy_mode==='docker'?'Docker':'裸金属')+' · '+info.arch,{open:true,icon:'server'});overview.body.append(systemResources(info));root.append(overview.root);
+ const upgrade=fold('system.upgrade','版本与升级','手动检查更新 · 升级期间自动重新连接',{open:true,icon:'tool'}),ops=el('div','actions'),result=el('div','help','点击检查更新，查询最新稳定版本。'),log=el('pre','logs'),progress=el('p','help');log.id='upgradeLog';progress.id='upgradeMessage';let latest='';
+ const start=button('一键升级',async()=>{if(!confirm('升级会中断面板与代理连接，确认现在升级？'))return;const baseline=await api('api/system/upgrade-status');await post('system/upgrade',latest?{version:latest}:{});state.upgradeBaseline=baseline;state.upgradeSeen=false;state.upgradeLog='';state.upgradeMessage='升级任务已提交，正在等待进度…';state.upgrading=true;state.upgradeStarted=Date.now();start.disabled=true;paintUpgrade();pollUpgrade()},'primary');start.disabled=!info.upgrade_supported||info.deploy_mode==='docker'||state.upgrading;
+ ops.append(button('检查更新',async()=>{const j=await post('system/check-update');latest=j.latest||'';result.textContent=j.has_update?'发现新版本 '+j.latest+'（当前 '+j.current+'）':'当前已是最新稳定版本 '+j.current;toast(result.textContent)}),start);upgrade.body.append(ops,result,progress,log);state.upgradeButton=start;
+ if(info.deploy_mode==='docker'||!info.upgrade_supported){upgrade.body.append(note('请在 Docker 宿主机执行升级命令；容器内无法完成宿主镜像更新。','warning'),el('pre','uri-box',hostUpgrade),button('复制宿主升级命令',()=>copy(hostUpgrade),'quiet','copy'))}root.append(upgrade.root);
+ const policy=fold('system.policy','自动升级与保留策略',(info.auto_upgrade?'自动升级已开启':'自动升级已关闭')+' · 每类保留 '+(settings.backup_keep||5)+' 份备份',{icon:'settings'}),auto=field('自动升级',String(!!info.auto_upgrade),{choices:[['false','关闭'],['true','开启 · 每周检查稳定版']]}),keep=field('每类备份保留份数',settings.backup_keep||5,{type:'number',min:1,max:30,id:'backup_keep'}),pg=el('div','grid');auto.input.disabled=!info.auto_upgrade_supported||info.deploy_mode==='docker';pg.append(auto.wrap,keep.wrap);policy.body.append(pg);if(auto.input.disabled)policy.body.append(help('Docker 不支持容器内自动升级，请在宿主机使用上方升级命令。'));const form=watchForm(policy.root,{auto:auto.input,keep:keep.input},policy.mark),save=el('div','actions end');save.append(button('保存策略',()=>formAction(form,async()=>{const count=Number(keep.input.value);if(!Number.isInteger(count)||count<1||count>30)throw new Error('备份保留份数必须为 1–30');if(keep.input.value!==form.initial.keep){await post('settings',{backup_keep:count});form.initial.keep=keep.input.value}if(info.auto_upgrade_supported&&info.deploy_mode!=='docker'&&auto.input.value!==form.initial.auto){await post('system/auto-upgrade',{enabled:auto.input.value==='true'});form.initial.auto=auto.input.value}form.accept();policy.sub.textContent=(auto.input.value==='true'?'自动升级已开启':'自动升级已关闭')+' · 每类保留 '+count+' 份备份';toast('维护策略已保存')}),'primary'));policy.body.append(save,help('每类备份按最近份数保留，并受总空间预算约束；自动升级默认关闭。'));root.append(policy.root);
+ const cleanup=fold('system.cleanup','空间清理','按已保存的保留策略清理备份、日志与过期临时文件',{icon:'tool'}),cleanupLog=el('pre','logs','尚未执行清理');cleanup.body.append(button('一键清理',async()=>{if(!confirm('按保留策略清理旧备份、日志与过期临时文件？'))return;const j=await post('system/cleanup');cleanupLog.textContent='已释放 '+bytes(j.freed_bytes)+'\n'+(j.log||'清理完成');toast('清理完成，释放 '+bytes(j.freed_bytes));const fresh=await api('api/system/info');if(overview.root.isConnected)overview.body.replaceChildren(systemResources(fresh))},'primary'),cleanupLog);root.append(cleanup.root);
+ if(status.running){state.upgrading=true;state.upgradeStarted=state.upgradeStarted||Date.now();start.disabled=true}state.upgradeLog=status.log||state.upgradeLog;state.upgradeMessage=status.running?'升级进行中；面板重启时将自动重连':status.result==='success'?'上次升级成功':status.result==='failed'?'上次升级失败，请查看日志':state.upgradeMessage;paintUpgrade();if(state.upgrading)pollUpgrade();
+}
+function paintUpgrade(){const log=$('#upgradeLog'),message=$('#upgradeMessage');if(log){log.textContent=state.upgradeLog||'等待升级日志…';log.scrollTop=log.scrollHeight}if(message)message.textContent=state.upgradeMessage}
+async function pollUpgrade(){
+ clearTimeout(state.upgradeTimer);if(!state.upgrading||!state.authed||state.upgradePolling)return;state.upgradePolling=true;
+ try{
+  const j=await api('api/system/upgrade-status',{quiet:true});state.upgradeLog=j.log||state.upgradeLog;
+  if(j.running){state.upgradeSeen=true;state.upgradeMessage='升级进行中；面板重启后会自动重新连接'}
+  else if(['success','failed'].includes(j.result)&&(state.upgradeSeen||!state.upgradeBaseline||j.result!==state.upgradeBaseline.result||j.log!==state.upgradeBaseline.log)){state.upgrading=false;state.upgradeSeen=false;state.upgradeBaseline=null;state.upgradeMessage=j.result==='success'?'升级成功，已重新连接面板':'升级失败，请查看日志与回滚结果';if(state.upgradeButton?.isConnected)state.upgradeButton.disabled=false;toast(state.upgradeMessage);if(j.result==='success'){state.dashboard=null;const a=await api('api/auth',{quiet:true});if(!a.authed){showLogin(true);return}$('#verTag').textContent='v'+String(a.version||'-').replace(/^v/,'');if(state.tab==='system'){const seq=state.seq,fresh=await api('api/system/info',{quiet:true});if(seq===state.seq){const p=$('#content').querySelector('[data-fold="system.resources"]');if(p){p.querySelector('.panel-body').replaceChildren(systemResources(fresh));const sub=p.querySelector('small');if(sub)sub.textContent=fresh.version+' · 升级后已重新连接'}}}}}
+  else state.upgradeMessage='等待升级任务启动…';
+ }catch(e){state.upgradeMessage=e.status===401?'面板已恢复，请登录后继续查看进度':'面板暂时离线，正在自动重连…'}
+ finally{state.upgradePolling=false;paintUpgrade();if(state.upgrading&&state.authed){if(Date.now()-(state.upgradeStarted||0)>20*60*1000){state.upgrading=false;state.upgradeMessage='等待超过 20 分钟，请重新进入维护页核实升级状态';if(state.upgradeButton?.isConnected)state.upgradeButton.disabled=false;paintUpgrade()}else state.upgradeTimer=setTimeout(pollUpgrade,2000)}}
+}
+for(const [tab,info] of Object.entries(pages)){const b=button(info[0],()=>showTab(tab),'',info[3]);b.dataset.tab=tab;const text=b.lastChild;if(text)text.remove();b.append(el('span','nav-text',info[0]));b.title=info[0];$('#nav').append(b)}
+$('#loginForm').addEventListener('submit',e=>{e.preventDefault();run($('#loginBtn'),doLogin)});
+$('#menuBtn').append(icon('menu'));$('#menuBtn').addEventListener('click',toggleSidebar);for(const n of [$('#closeMenu'),$('#sidebarOverlay')])n.addEventListener('click',()=>{closeSidebar();$('#menuBtn').focus()});$('#collapseBtn').addEventListener('click',()=>{const v=!$('#sidebar').classList.contains('collapsed');setCollapsed(v);remember('ansgo_sidebar',v?'collapsed':'expanded')});$('#themeBtn').addEventListener('click',toggleTheme);mobileMedia.addEventListener?.('change',syncDrawer);syncDrawer();
+$('#logoutBtn').addEventListener('click',()=>run($('#logoutBtn'),async()=>{if(busyForms()){toast('配置正在应用，请稍候');return}if(dirtyForms()&&!confirm('退出会放弃未保存修改，继续？'))return;await post('logout');state.forms.clear();state.landings.clear();state.services.clear();state.upgrading=false;clearTimeout(state.upgradeTimer);showLogin()}));
 $('#overlay').addEventListener('click',e=>{if(e.target===$('#overlay'))closeOverlay()});
-
-// 服务管理（v1.5.18 重构：单菜单合并「服务控制」；每个输入框右侧带 🎲；
-//   操作行一行自适应：[应用][启停][重启][装卸][检测]）
-// 一次并行拉取 dashboard（状态/端口/svc_enabled）+ node（密钥/凭证），每服务渲染一张卡片。
-// 保留所有原有字段 ID（#p_ss / #k_at_pass 等），让 svcInstall/svc/checkHealth 无需改动。
-async function loadMgmt(){
-  $('#content').innerHTML='<div class="mut">加载中…</div>';
-  const [d,n]=await Promise.all([api('api/dashboard'),api('api/node')]);
-  if(d.error)return $('#content').innerHTML='<div class="card">'+d.error+'</div>';
-  if(n.error)return $('#content').innerHTML='<div class="card">'+n.error+'</div>';
-  const en=d.svc_enabled||{};
-  const ports=d.ports||{};
-  const st=d.services||{};
-  const ss=n.ss||{}, at=n.anytls||{}, sk=n.socks||{}, nv=n.naive||{};
-  // 状态标签：未安装（灰色）/ 已安装·active（绿）/ 已安装·inactive（橙）
-  const statusTag=(enabled,active)=>{
-    if(!enabled)return '<span class="tag">未安装</span>';
-    return active==='active'
-      ?'<span class="tag" style="background:var(--ok);color:#fff">已安装·运行中</span>'
-      :'<span class="tag" style="background:var(--warn);color:#fff">已安装·未运行</span>';
-  };
-  // 带右侧 🎲 的输入框行（fieldId 传给 genField）
-  const frow=(label,fieldId,val,placeholder,type='text')=>{
-    const t=type==='number'?'type="number"':'';
-    return `<div class="row"><label>${label}</label><div class="f field-inline">
-      <input id="${fieldId}" ${t} value="${val||''}" placeholder="${placeholder}">
-      <button class="mut dice" title="随机生成（不自动保存）" onclick="genField('${fieldId}')">🎲</button>
-    </div></div>`;
-  };
-  // 操作行：按可用性自适应。顺序：[应用][启停][重启][装卸][检测]
-  // 未安装：仅 [安装]
-  // 已安装：[应用] + [启动/停止] + [重启] + [卸载] + [检测] + [修复]
-  const opsRow=(target,enabled,active)=>{
-    if(!enabled){
-      return `<div class="ops-row"><button class="primary" onclick="svcInstall('${target}','install')">📥 安装</button></div>`;
-    }
-    const toggleBtn=active==='active'
-      ?`<button onclick="svc('${target}','stop')">⏹ 停止</button>`
-      :`<button class="primary" onclick="svc('${target}','start')">▶️ 启动</button>`;
-    // v1.5.24：修复配置按钮——target 映射到 carrier（naive→caddy，其余→sing-box）
-    const carrier=target==='naive'?'caddy':'sing-box';
-    return `<div class="ops-row">
-      <button class="primary" onclick="svcSave('${target}')">💾 应用</button>
-      ${toggleBtn}
-      <button class="ok" onclick="svc('${target}','restart')">🔄 重启</button>
-      <button class="danger" onclick="svcInstall('${target}','uninstall')">📤 卸载</button>
-      <button class="mut" onclick="checkHealth('${target}',this)">🔍 检测</button>
-      <button class="mut" onclick="repairSvc('${carrier}',this)" title="从 secrets.env 重新生成配置并重启（修复凭证不同步）">🔧 修复</button>
-    </div>
-    <div id="health-${target}" style="margin-top:6px"></div>`;
-  };
-  $('#content').innerHTML=`
-   <div class="card"><h3>🗂️ 服务管理</h3>
-     <div class="help">一站式管理各代理服务：安装/卸载、端口、密钥、启停。修改端口或密钥后点「应用」保存（对应服务自动重启）。🎲 仅生成不保存。落地服务（AnyTLS-2）在「落地服务」页启用后下方显示。</div></div>
-
-   <div class="card">
-     <h3>🛡️ AnyTLS ${statusTag(en.anytls,st.anytls)}</h3>
-     <div class="row"><label>端口</label><div class="f"><input id="p_anytls" type="number" value="${ports.anytls||''}" placeholder="10000-65535"></div></div>
-     ${frow('AnyTLS 密码','k_at_pass',at.password,'任意字符串')}
-     ${opsRow('anytls',en.anytls,st.anytls)}
-   </div>
-
-   <div class="card">
-     <h3>🌀 NaiveProxy ${statusTag(en.naive,st.naive)}</h3>
-     <div class="row"><label>端口</label><div class="f"><input id="p_naive" type="number" value="${ports.naive||''}" placeholder="10000-65535"></div></div>
-     ${frow('Naive 用户名','k_nv_user',nv.user,'用户名')}
-     ${frow('Naive 密码','k_nv_pass',nv.pass,'密码')}
-     ${opsRow('naive',en.naive,st.naive)}
-   </div>
-
-   <div class="card">
-     <h3>🔐 Shadowsocks ${statusTag(en.ss,st.ss)}</h3>
-     <div class="row"><label>端口</label><div class="f"><input id="p_ss" type="number" value="${ports.ss||''}" placeholder="10000-65535"></div></div>
-     <div class="row"><label>加密方式</label><div class="f"><input id="k_ss_method" value="${ss.method||'2022-blake3-aes-128-gcm'}" placeholder="2022-blake3-aes-128-gcm"></div></div>
-     ${frow('SS 密钥','k_ss_key',ss.password,'base64(16字节)密钥')}
-     ${opsRow('ss',en.ss,st.ss)}
-   </div>
-
-   <div class="card">
-     <h3>🧦 SOCKS5 ${statusTag(en.socks,st.socks)}</h3>
-     <div class="row"><label>端口</label><div class="f"><input id="p_socks" type="number" value="${ports.socks||''}" placeholder="10000-65535"></div></div>
-     ${frow('SOCKS 用户名','k_sk_user',sk.user,'用户名')}
-     ${frow('SOCKS 密码','k_sk_pass',sk.pass,'密码')}
-     ${opsRow('socks',en.socks,st.socks)}
-   </div>
-
-   <div class="card">
-     <h3>⚙️ 管理面板 <span class="tag" style="background:${st.panel==='active'?'var(--ok)':'var(--err)'};color:#fff">${st.panel==='active'?'运行中':'未运行'}</span></h3>
-     <div class="row"><label>面板端口</label><div class="f"><input id="p_panel" type="number" value="${ports.panel||''}" placeholder="10000-65535"></div><button class="danger" onclick="setPort('panel')">应用并重启</button></div>
-     <div class="help" style="margin-top:8px">⚠️ 改面板端口会让当前会话断开，需用 <code>https://${d.domain}:${ports.panel}<URL路径>/</code> 新地址重新登录。</div>
-     <div class="ops-row">
-       <button class="mut" onclick="checkHealth('panel',this)">🔍 检测</button>
-    </div>
-    <div id="health-panel" style="margin-top:6px"></div>
-   </div>`;
-}
-
-// 服务安装（面板内按需启用/停用代理服务）—— v1.5.10 起并入「服务管理」页，本函数保留作为兼容入口
-async function loadInstall(){
-  const j=await api('api/dashboard');
-  if(j.error)return $('#content').innerHTML=j.error;
-  const en=j.svc_enabled||{};
-  const card=(name,label,desc,enabled,port)=>{
-    const st=enabled?'<span class="tag" style="background:var(--ok);color:#fff">已安装</span>':'<span class="tag">未安装</span>';
-    return `<div class="card"><h3>${label} ${st}</h3><div class="mut" style="margin-bottom:10px;font-size:12px">${desc}</div>
-      <div class="row"><label>端口</label><div class="f"><code>${port}</code> <span class="mut">（在「端口管理」修改）</span></div></div>
-      <div style="margin-top:8px">${enabled?'<button class="danger" onclick="svcInstall(\''+name+'\',\'uninstall\')">卸载</button>':'<button class="primary" onclick="svcInstall(\''+name+'\',\'install\')">安装</button>'}</div>
-      <div class="help" style="margin-top:8px">${enabled?'卸载将停止该服务并移除其配置（密钥保留，可重装）。':'安装将生成配置并启动该服务。'}</div></div>`;
-  };
-  $('#content').innerHTML=`<div class="card"><h3>📦 代理服务安装</h3>
-     <div class="help" style="margin-bottom:6px">面板已就绪。以下代理服务可独立安装/卸载。安装后即对外提供代理，卸载则停止。落地服务在「落地服务」页。</div></div>`
-    +card('ss','Shadowsocks','sing-box shadowsocks-2022 inbound，加密 2022-blake3-aes-128-gcm。',en.ss,j.ports.ss)
-    +card('anytls','AnyTLS','sing-box anytls inbound，TLS 用共享证书。',en.anytls,j.ports.anytls)
-    +card('socks','SOCKS5','sing-box socks inbound，强制用户名/密码鉴权。',en.socks,j.ports.socks)
-    +card('naive','NaiveProxy','caddy forwardproxy-naive，含域名伪装反代。',en.naive,j.ports.naive);
-}
-async function svcInstall(name,act){
-  const verb=act==='install'?'安装':'卸载';
-  if(!confirm(`确认${verb} ${name} 服务？${act==='uninstall'?'该服务将停止，现有连接断开。':''}`))return;
-  toast(`正在${verb}…`);
-  const j=await api('api/svc-install',{method:'POST',body:JSON.stringify({service:name,action:act})});
-  if(j.ok){toast(`${verb}完成`);setTimeout(reloadCurrentTab,500)}
-  else toast((act==='install'?'安装失败: ':'操作失败: ')+(j.error||'未知')+(j.hint?'（'+j.hint+'）':''));
-}
-// 刷新当前激活 tab（svcInstall/setPort/saveKey/regen 完成后无差别刷新）
-function reloadCurrentTab(){
-  const cur=document.querySelector('.nav button.active');
-  if(cur&&cur.dataset.t)showTab(cur.dataset.t);
-}
-
-// 服务健康检测（v1.5.12）：systemd 状态 + 端口监听 + TCP 握手 三合一诊断
-// 结果就近渲染到 #health-<target> 容器内（dashboard / mgmt 页都复用）
-async function checkHealth(target,btn){
-  const origText=btn?btn.textContent:'';
-  if(btn){btn.disabled=true;btn.textContent='🔍 检测中…'}
-  const j=await api('api/health',{method:'POST',body:JSON.stringify({target})});
-  if(btn){btn.disabled=false;btn.textContent=origText}
-  const box=document.getElementById('health-'+target);
-  const esc=s=>escapeHtml(String(s||''));
-  if(!box)return;  // 容器不存在则只 toast
-  if(j.error){box.innerHTML=`<div style="color:var(--err);font-size:12px">❌ ${esc(j.error)}</div>`;return}
-  const line=(ok,label,val)=>`<div style="font-size:12px;line-height:1.7">
-    <span style="color:${ok?'var(--ok)':'var(--err)'}">${ok?'✅':'❌'}</span> <b>${label}:</b> ${val}</div>`;
-  const remoteOk=!j.landing_remote||j.landing_remote==='skip'||j.landing_remote==='yes';
-  const allOk=j.enabled&&j.active==='active'&&j.port_listening==='yes'&&j.tcp_connect==='yes'&&remoteOk;
-  // v1.5.35: 落地服务的远端检测行始终显示——skip 时说明「未启用远端（走 direct）」，
-  // 让用户明确知道为何没做远端协议探测，而不是空白让人误以为「没检测」。
-  const isLanding=(target||'').indexOf('landing')===0||target==='anytls2';
-  let remoteLine='';
-  if(j.landing_remote&&j.landing_remote!=='skip'){
-    remoteLine=line(j.landing_remote==='yes','远端落地',`${esc(j.landing_remote_protocol||'tcp')} ${esc(j.landing_remote_addr||'')} ${j.landing_remote==='yes'?'可用':'异常'}${j.landing_remote_ms?' ('+j.landing_remote_ms+'ms)':''}`);
-  }else if(isLanding&&j.landing_remote==='skip'){
-    remoteLine=line(false,'远端落地','未启用远端出口（该落地走 direct 直连，会暴露中转 IP；在「落地服务」页启用远端后再检测）');
-  }
-  const remoteReason=j.landing_remote_reason
-    ? `<div style="font-size:12px;line-height:1.7;color:${j.landing_remote==='yes'?'var(--mut)':'var(--warn)'}"><b>远端说明:</b> ${esc(j.landing_remote_reason)}</div>`
-    : '';
-  const td=j.time_diag||{};
-  const timeLine=j.time_diag
-    ? `<div style="font-size:12px;line-height:1.7;color:var(--mut)"><b>服务器时间:</b> ${esc(td.now_local)}（UTC: ${esc(td.now_utc)}，时区: ${esc(td.timezone||'unknown')} ${esc(td.offset||'')}，NTP: ${esc(td.ntp_synchronized||'unknown')}）<br><span>提示：时区只影响显示；Shadowsocks 2022 依赖系统时间/NTP 同步。</span></div>`
-    : '';
-  const probeNote=(j.landing_remote_protocol==='ss')
-    ? `<div style="font-size:12px;line-height:1.7;color:var(--mut)">说明：远端 Shadowsocks 协议探测会通过远端出口访问公共连通性检测 URL。</div>`
-    : '';
-  box.innerHTML=`<div style="background:var(--card2);border:1px solid var(--bd);border-radius:6px;padding:10px;margin-top:8px">
-    ${line(j.enabled,'服务状态',j.enabled?'已启用':'未启用')}
-    ${j.enabled?line(j.active==='active','进程',''+j.unit+': '+j.active):''}
-    ${j.enabled&&j.port?line(j.port_listening==='yes','端口监听',':'+j.port+' '+(j.port_listening==='yes'?'LISTEN':'未监听')):''}
-    ${j.enabled&&j.port_listening==='yes'?line(j.tcp_connect==='yes','TCP 握手',(j.tcp_connect==='yes'?'成功 ('+j.tcp_ms+'ms)':'失败')):''}
-    ${remoteLine}
-    ${remoteReason}
-    ${timeLine}
-    ${probeNote}
-    <div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--bd);color:${allOk?'var(--ok)':'var(--warn)'}">
-      <b>诊断:</b> ${esc(j.summary)}
-    </div></div>`;
-}
-
-// 服务控制
-async function loadSvc(){
-  const j=await api('api/dashboard');
-  const items=[['NaiveProxy','naive',j.services.naive],['SOCKS5','socks',j.services.socks],['AnyTLS','anytls',j.services.anytls],['Shadowsocks','ss',j.services.ss],['管理面板','panel',j.services.panel]];
-  $('#content').innerHTML=`<div class="card"><h3>🎛️ 服务控制</h3>
-   <table><tr><th>服务</th><th>状态</th><th>操作</th></tr>${items.map(x=>`<tr><td>${x[0]}</td><td>${dot(x[2])}</td>
-     <td><button class="ok" onclick="svc('${x[1]}','restart')">重启</button>
-     ${x[1]==='panel'?'<button onclick="svc(\''+x[1]+'\',\'stop\')" style="opacity:.6">停止</button>':'<button onclick="svc(\''+x[1]+'\',\'stop\')">停止</button><button onclick="svc(\''+x[1]+'\',\'start\')">启动</button>'}</td></tr>`).join('')}</table>
-   <div class="help" style="margin-top:10px">⚠️ 停止"管理面板"后需 SSH 执行 <code>ansgo-admin restart panel</code> 恢复。重启会断开现有代理连接。</div></div>`;
-}
-async function svc(t,a){
-  const verb={restart:'重启',stop:'停止',start:'启动'}[a];
-  if(!confirm(`确认${verb} ${t}？${a==='restart'||a==='stop'?'现有连接会断开。':''}`))return;
-  toast('正在'+verb+'…');
-  const j=await api('api/service',{method:'POST',body:JSON.stringify({target:t,action:a})});
-  if(j.ok){toast(verb+'完成');setTimeout(reloadCurrentTab,800)}
-  else toast(j.error||'操作失败');
-}
-
-// 端口管理
-function loadPort(){
-  $('#content').innerHTML=`<div class="card"><h3>🔧 端口管理</h3>
-   <div class="help" style="margin-bottom:12px">修改后对应服务会自动重新生成配置并重启。改面板端口会重启面板（需用新端口重新登录）。</div>
-   <div class="row"><label>Shadowsocks</label><div class="f"><input id="p_ss" type="number" placeholder="23456"></div><button class="primary" onclick="setPort('ss')">应用</button></div>
-   <div class="row"><label>AnyTLS</label><div class="f"><input id="p_anytls" type="number" placeholder="8443"></div><button class="primary" onclick="setPort('anytls')">应用</button></div>
-   <div class="row"><label>SOCKS5</label><div class="f"><input id="p_socks" type="number" placeholder="10808"></div><button class="primary" onclick="setPort('socks')">应用</button></div>
-   <div class="row"><label>NaiveProxy</label><div class="f"><input id="p_naive" type="number" placeholder="44333"></div><button class="primary" onclick="setPort('naive')">应用</button></div>
-   <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
-   <div class="row"><label>管理面板</label><div class="f"><input id="p_panel" type="number" placeholder="15608"></div><button class="danger" onclick="setPort('panel')">应用并重启</button></div></div>`;
-  api('api/settings').then(j=>{if(!j.error){['ss','anytls','socks','naive','panel'].forEach(k=>{const e=$('#p_'+k);if(e)e.placeholder=j[k+'_port']})}});
-}
-async function setPort(t){
-  const v=parseInt($('#p_'+t).value);if(!v||v<1||v>65535)return toast('请输入有效端口');
-  if(!confirm(`确认把 ${t} 端口改为 ${v}？${t==='panel'?'面板将重启，需用新端口重新登录。':'该协议会重启，现有连接断开。'}`))return;
-  const j=await api('api/port',{method:'POST',body:JSON.stringify({target:t,port:v})});
-  if(t==='panel'&&j.new_url){showRestartOverlay(j.msg||'面板即将重启',j.new_url,3);return}
-  if(j.ok)toast('端口已更新');else toast(j.error||'失败');
-}
-
-// 密钥管理（手动设置 + 随机生成二合一）
-async function loadKey(){
-  const n=await api('api/node');
-  const ss=n.ss||{}, at=n.anytls||{}, sk=n.socks||{}, nv=n.naive||{};
-  const row=(title,html)=>`<div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"><b>${title}</b></div>${html}`;
-  $('#content').innerHTML=`<div class="card"><h3>🔑 密钥管理</h3>
-   <div class="help" style="margin-bottom:12px">支持手动输入自定义密钥，或点 🎲 随机生成。保存后旧密钥立即失效，所有客户端需更新；服务会自动重启（断开现有连接）。<br><span class="mut">落地服务的密钥请在「落地服务」页用「🎲 重置凭证」管理。</span></div>
-   ${row('Shadowsocks',
-     `<div class="row"><label>加密方式</label><div class="f"><input id="k_ss_method" value="${n.ss?(ss.method||'2022-blake3-aes-128-gcm'):''}" placeholder="2022-blake3-aes-128-gcm"></div></div>
-      <div class="row"><label>SS 密钥</label><div class="f"><input id="k_ss_key" value="${ss.password||''}" placeholder="base64(16字节)密钥"></div></div>
-      <div style="margin-top:6px"><button class="mut" onclick="regen('ss')">🎲 随机生成</button> <button class="primary" onclick="saveKey('ss')">💾 保存</button></div>`)}
-   ${row('AnyTLS',
-     `<div class="row"><label>AnyTLS 密码</label><div class="f"><input id="k_at_pass" value="${at.password||''}" placeholder="任意字符串"></div></div>
-      <div style="margin-top:6px"><button class="mut" onclick="regen('anytls')">🎲 随机生成</button> <button class="primary" onclick="saveKey('anytls')">💾 保存</button></div>`)}
-   ${row('SOCKS5',
-     `<div class="row"><label>SOCKS 用户名</label><div class="f"><input id="k_sk_user" value="${sk.user||''}" placeholder="用户名"></div></div>
-      <div class="row"><label>SOCKS 密码</label><div class="f"><input id="k_sk_pass" value="${sk.pass||''}" placeholder="密码"></div></div>
-      <div style="margin-top:6px"><button class="mut" onclick="regen('socks')">🎲 随机生成</button> <button class="primary" onclick="saveKey('socks')">💾 保存</button></div>`)}
-   ${row('NaiveProxy',
-     `<div class="row"><label>Naive 用户名</label><div class="f"><input id="k_nv_user" value="${nv.user||''}" placeholder="用户名"></div></div>
-      <div class="row"><label>Naive 密码</label><div class="f"><input id="k_nv_pass" value="${nv.pass||''}" placeholder="密码"></div></div>
-      <div style="margin-top:6px"><button class="mut" onclick="regen('naive')">🎲 随机生成</button> <button class="primary" onclick="saveKey('naive')">💾 保存</button></div>`)}
-   </div>`;
-}
-async function regen(t){
-  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',socks:'SOCKS5',naive:'NaiveProxy'}[t]||t;
-  if(!confirm(`⚠️ 确认随机重新生成 ${lbl} 的密钥？\n\n此操作会：\n• 备份当前配置\n• 生成新密钥\n• 重启该服务（断开现有连接）\n• 旧密钥立即失效`))return;
-  toast('正在生成新密钥…');
-  const j=await api('api/regen',{method:'POST',body:JSON.stringify({target:t})});
-  if(j.ok){toast('密钥已更新');reloadCurrentTab()}
-  else toast(j.error||'失败');
-}
-async function saveKey(t){
-  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',socks:'SOCKS5',naive:'NaiveProxy'}[t]||t;
-  let body={target:t};
-  if(t==='ss'){body.method=$('#k_ss_method').value;body.key=$('#k_ss_key').value}
-  else if(t==='anytls'){body.pass=$('#k_at_pass').value}
-  else if(t==='socks'){body.user=$('#k_sk_user').value;body.pass=$('#k_sk_pass').value}
-  else if(t==='naive'){body.user=$('#k_nv_user').value;body.pass=$('#k_nv_pass').value}
-  if(!confirm(`⚠️ 确认手动保存 ${lbl} 的密钥？\n\n保存后旧密钥立即失效，所有客户端需更新；对应服务会自动重启。`))return;
-  toast('正在保存…');
-  const j=await api('api/key',{method:'POST',body:JSON.stringify(body)});
-  if(j.ok){toast('密钥已保存，服务正在重启');reloadCurrentTab()}
-  else toast(j.error||'保存失败');
-}
-// ---- v1.5.18 新增：前端随机生成（不保存）+ svcSave（一次保存端口+密钥）----
-// base64(n 字节)，与 openssl rand -base64 n 等价（SS2022 密钥格式）
-function randB64Bytes(n){
-  const b=new Uint8Array(n);
-  crypto.getRandomValues(b);
-  let s='';for(let i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);
-  return btoa(s);
-}
-// 可读随机串：默认大小写字母+数字，可传 alphabet 限定字符集
-function randStr(len,alphabet){
-  const A=alphabet||'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  const b=new Uint8Array(len);crypto.getRandomValues(b);
-  let s='';for(let i=0;i<len;i++)s+=A[b[i]%A.length];
-  return s;
-}
-// 按 input id 在前端生成并回填（不保存，需用户点「应用」）
-function genField(id){
-  let v='';
-  switch(id){
-    case 'k_ss_key':    v=randB64Bytes(16);break;                                  // base64(16) SS2022
-    case 'k_at_pass':   v=randStr(20);break;                                       // 20 位混合（AnyTLS 密码）
-    case 'k_sk_pass':
-    case 'k_nv_pass':    v=randStr(18);break;                                       // 18 位混合
-    case 'k_sk_user':
-    case 'k_nv_user':    v=randStr(8,'abcdefghijklmnopqrstuvwxyz0123456789');break;  // 8 位小写
-    default:
-      // v1.5.26: 落地服务密码字段 id 形如 ld_<id>_pass（在落地服务页用 🎲 随机生成，不自动保存）
-      if(/^ld_.+_pass$/.test(id)){v=randStr(20);break;}
-      return;  // 加密方式等不随机
-  }
-  const el=document.getElementById(id);
-  if(el){el.value=v;el.focus();toast('已生成，需点「应用」保存')}
-}
-// 保存全部：串行调 portHandler（端口 + 冲突校验 + 重启）+ keyHandler（密钥 + 长度校验 + 异步重启）
-// 面板端口（panel）特殊，不走此函数（会断会话，走 setPort + overlay）
-async function svcSave(target){
-  const lbl={ss:'Shadowsocks',anytls:'AnyTLS',socks:'SOCKS5',naive:'NaiveProxy'}[target]||target;
-  if(!confirm(`⚠️ 确认保存 ${lbl} 的全部改动？\n\n端口与密钥将一起更新，对应服务会重启，现有连接断开。`))return;
-  toast('正在保存…');
-  // 1) 端口（仅在用户实际改动了端口输入框时才发端口请求）
-  const portEl=document.getElementById('p_'+target);
-  if(portEl){
-    const v=parseInt(portEl.value);
-    if(v && v>=1 && v<=65535){
-      const pr=await api('api/port',{method:'POST',body:JSON.stringify({target,port:v})});
-      if(pr.error){toast('端口保存失败: '+pr.error);return}
-    }
-  }
-  // 2) 密钥/凭证（按 target 拼 body）
-  let body={target};
-  if(target==='ss'){body.method=$('#k_ss_method').value;body.key=$('#k_ss_key').value}
-  else if(target==='anytls'){body.pass=$('#k_at_pass').value}
-  else if(target==='socks'){body.user=$('#k_sk_user').value;body.pass=$('#k_sk_pass').value}
-  else if(target==='naive'){
-    // v1.5.23：NaiveProxy 凭证写入 Caddyfile basic_auth，含空格/{} 会破坏语法
-    // → caddy 重启失败。前端先拦，后端 keyHandler 也校验（双保险）。
-    const nu=$('#k_nv_user').value, np=$('#k_nv_pass').value;
-    if(/[ \t\r\n{}]/.test(nu)||/[ \t\r\n{}]/.test(np)){
-      toast('NaiveProxy 用户名/密码不能含空格或花括号 {}（会破坏 Caddyfile）');return;
-    }
-    body.user=nu;body.pass=np;
-  }
-  else{toast('不支持的目标');return}
-  const kr=await api('api/key',{method:'POST',body:JSON.stringify(body)});
-  if(kr.error){
-    // v1.5.24：keyHandler 现在同步验证 caddy active，失败时返回详细诊断
-    toast('保存失败: '+kr.error+(kr.hint?'（'+kr.hint+'）':''));
-    return;
-  }
-  toast('已保存，服务已重启并验证运行');
-  setTimeout(reloadCurrentTab,800);
-}
-
-// v1.5.24：一键修复代理配置——从 secrets.env 重新生成配置 + 重启 + 验证 active。
-// 解决「反代正常但代理不能用」：通常是 secrets.env 与 Caddyfile 不同步（旧版
-// 异步写 secrets 再 genconf 中途失败留下不一致），配合 NaiveProxy probe_resistance
-// 认证失败静默走伪装，极具迷惑性。修复按钮强制同步 secrets↔配置。
-async function repairSvc(target,btn){
-  const lbl={caddy:'Caddy(NaiveProxy)',sing_box:'sing-box(AnyTLS/SS/SOCKS5)'}[target]||target;
-  if(!confirm(`🔧 修复 ${lbl} 配置？\n\n将从 secrets.env 重新生成配置并重启服务（现有连接断开）。\n适用于「检测正常但代理不能用」的凭证不同步问题。`))return;
-  const old=btn?btn.textContent:'';
-  if(btn){btn.textContent='⏳ 修复中…';btn.disabled=true}
-  toast('正在修复（重新生成配置+重启+验证，约 2-5 秒）…');
-  try{
-    const j=await api('api/repair',{method:'POST',body:JSON.stringify({target})});
-    if(j.ok){
-      toast('✓ '+lbl+' 配置已修复并验证 active，请用节点信息页最新凭证配置客户端');
-      setTimeout(reloadCurrentTab,1000);
-    }else{
-      const r=(j.results&&(j.results[target]||j.results[target.split('_')[0]]))||{};
-      toast('修复失败: '+(r.error||j.error||'未知错误')+'（查看 journalctl 日志）');
-    }
-  }catch(e){toast('修复异常: '+e.message)}
-  if(btn){btn.textContent=old;btn.disabled=false}
-}
-
-// 落地服务（v1.5.26 重写：从单 AnyTLS-2 改为可创建多个的动态列表）
-//   每个落地服务 = 一个 anytls 入站 + 可选一个远端出站（SS/SOCKS5），在同一张卡片内配置。
-//   - 「➕ 新增」：弹窗填名称+端口创建（后端分配 id + 生成凭证）
-//   - 每张卡片：名称/端口/远端配置可改 -> 💾保存调 update；🎲重置凭证调 regen；🔍检测；🗑删除
-//   - 远端类型下拉切换 SS/SOCKS5 时动态显隐字段
-async function loadLanding(){
-  const L=await api('api/landings');
-  if(L.error)return $('#content').innerHTML='<div class="card">'+L.error+'</div>';
-  const landings=L.landings||[];
-  const cards=landings.map(renderLandingCard).join('');
-  $('#content').innerHTML=`
-   <div class="card"><h3>🛬 落地服务 <button class="primary" style="margin-left:auto;font-size:13px;padding:5px 12px" onclick="newLanding()">➕ 新增落地服务</button></h3>
-     <div class="help" style="margin-bottom:8px">每个落地服务 = 一个独立的 <b>AnyTLS 入站</b>（独立端口/凭证）+ 可选一个<b>远端落地出口</b>（Shadowsocks 或 SOCKS5）。远端关闭则该落地走 direct。<br>NaiveProxy / SOCKS5（第一组）不参与远端落地（caddy/sing-box 进程隔离约束）。</div>
-   </div>
-   ${cards||'<div class="card"><div class="mut">暂无落地服务。点上方「➕ 新增落地服务」创建。</div></div>'}`;
-}
-// 渲染单张落地服务卡片（id 用作 DOM 前缀，保证多卡字段 ID 不冲突）
-function renderLandingCard(L){
-  const p=L.id;
-  const en=L.enabled;
-  const rtype=L.remote_type||'ss';
-  const ssFields=rtype==='ss';
-  const socksFields=rtype==='socks';
-  const rMethod=L.remote_method||'2022-blake3-aes-128-gcm';
-  // v1.5.35: 顶部「出口方式」徽章 —— 让「远端落地」是否真正启用一眼可见，
-  // 避免「填了远端字段但开关没开 → 走 direct 泄漏中转 IP」的迷惑。
-  const ren=L.remote_enabled===true;
-  const viaBadge=ren
-    ? (rtype==='socks'?'<span class="tag" style="background:var(--ok);color:#fff">🌐 出口：SOCKS5 远端落地</span>'
-                     :'<span class="tag" style="background:var(--ok);color:#fff">🌐 出口：SS 远端落地</span>')
-    : '<span class="tag" style="background:var(--warn);color:#fff">⚠️ 出口：直连（未启用远端，会暴露中转 IP）</span>';
-  // 检测是否「填了远端字段但开关没开」（后端 normalizeLanding 会自动修，这里仅提示）
-  const fieldsFilled=(L.remote_host||'')!==''&&(L.remote_port||0)>0;
-  const staleHint=(!ren&&fieldsFilled)
-    ? '<div class="help" style="margin-top:4px;color:var(--warn)">检测到已填写远端地址/端口但「启用远端」为关闭。保存后将自动启用远端出口（v1.5.35），或手动把「启用远端」改为「启用」。</div>'
-    : '';
-  return `<div class="card"><h3>📦 ${escapeHtml(L.name||('落地#'+p))} ${en?'<span class="tag" style="background:var(--ok);color:#fff">已启用</span>':'<span class="tag">已关闭</span>'} ${viaBadge}</h3>
-    <div class="row"><label>名称</label><div class="f"><input id="ld_${p}_name" value="${escapeHtml(L.name||'')}" placeholder="如：香港落地"></div></div>
-    <div class="row"><label>端口</label><div class="f"><input id="ld_${p}_port" type="number" value="${L.port||''}" placeholder="10000-65535"></div></div>
-    <div class="row"><label>启用</label><div class="f"><select id="ld_${p}_en"><option value="false" ${!en?'selected':''}>关闭</option><option value="true" ${en?'selected':''}>启用</option></select></div></div>
-    <div class="row"><label>AnyTLS 密码</label><div class="f field-inline"><input id="ld_${p}_pass" value="${escapeHtml(L.password||'')}" placeholder="🎲 随机生成或手动填" ${L.has_keys?'':'disabled'}><button class="mut dice" title="随机生成（不自动保存）" onclick="genField('ld_${p}_pass')">🎲</button></div></div>
-    <div style="border-top:1px solid var(--bd);margin:12px 0;padding-top:10px"><b>🌐 远端落地出口</b></div>
-    <div class="row"><label>启用远端</label><div class="f"><select id="ld_${p}_ren" onchange="onLandingRemoteToggle('${p}')"><option value="false" ${!ren?'selected':''}>关闭（走 direct）</option><option value="true" ${ren?'selected':''}>启用</option></select></div></div>
-    <div class="row"><label>远端类型</label><div class="f"><select id="ld_${p}_rtype" onchange="toggleRemoteType('${p}')"><option value="ss" ${ssFields?'selected':''}>Shadowsocks</option><option value="socks" ${socksFields?'selected':''}>SOCKS5</option></select></div></div>
-    <div class="row"><label>远端地址</label><div class="f"><input id="ld_${p}_rhost" value="${escapeHtml(L.remote_host||'')}" placeholder="落地机 IP 或域名"></div></div>
-    <div class="row"><label>远端端口</label><div class="f"><input id="ld_${p}_rport" type="number" value="${L.remote_port||''}" placeholder="如 8388 / 1080"></div></div>
-    <div id="ld_${p}_sswrap" style="display:${ssFields?'block':'none'}">
-      <div class="row"><label>加密方式</label><div class="f"><input id="ld_${p}_rmethod" value="${escapeHtml(rMethod)}"></div></div>
-      <div class="row"><label>SS 密钥</label><div class="f"><input id="ld_${p}_rpass" value="${escapeHtml(L.remote_password||'')}" placeholder="base64 密钥（2022-blake3 需 24/44 字符）"></div></div>
-    </div>
-    <div id="ld_${p}_sockswrap" style="display:${socksFields?'block':'none'}">
-      <div class="row"><label>SOCKS5 用户</label><div class="f"><input id="ld_${p}_ruser" value="${escapeHtml(L.remote_user||'')}"></div></div>
-      <div class="row"><label>SOCKS5 密码</label><div class="f"><input id="ld_${p}_rpass2" value="${escapeHtml(L.remote_password||'')}"></div></div>
-    </div>
-    ${staleHint}
-    <div class="ops-row">
-      <button class="primary" onclick="saveLanding('${p}')">💾 保存</button>
-      <button class="mut" onclick="regenLanding('${p}',this)">🎲 重置凭证</button>
-      <button class="mut" onclick="checkHealth('landing-${p}',this)">🔍 检测</button>
-      <button class="mut" style="color:var(--err)" onclick="deleteLanding('${p}')">🗑 删除</button>
-    </div>
-    <div id="health-landing-${p}" style="margin-top:6px"></div>
-    <div class="help" style="margin-top:8px">「💾 保存」会校验后同步 genconf + 重启 sing-box（约 3-5 秒）；「🎲 重置凭证」生成新 anytls 密码（旧凭证失效）；远端密钥错误会导致落地连接失败。v1.5.35：远端字段（地址+端口+密钥）齐全时保存会自动启用远端出口。</div>
-  </div>`;
-}
-// escapeHtml 防止名称/密码里的 < > & " ' 破坏 HTML 属性（v1.5.26 新增，落地名称用户可控）
-function escapeHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-// 远端类型切换：显隐 SS / SOCKS5 字段区
-function toggleRemoteType(p){
-  const rtype=$('#ld_'+p+'_rtype').value;
-  $('#ld_'+p+'_sswrap').style.display=(rtype==='ss')?'block':'none';
-  $('#ld_'+p+'_sockswrap').style.display=(rtype==='socks')?'block':'none';
-}
-// v1.5.35: 「启用远端」开关切换时给即时反馈（用户明确选「启用」时确认远端字段已填）
-function onLandingRemoteToggle(p){
-  const ren=$('#ld_'+p+'_ren').value==='true';
-  if(ren){
-    const host=($('#ld_'+p+'_rhost').value||'').trim();
-    const port=parseInt($('#ld_'+p+'_rport').value)||0;
-    if(!host||!port){toast('已启用远端，但远端地址/端口为空——请填写落地机地址和端口后再保存');}
-  }
-}
-// 新增落地服务（弹窗）
-async function newLanding(){
-  const name=prompt('请输入落地服务名称：','落地服务');
-  if(name===null)return;
-  const nameT=name.trim();
-  if(!nameT){toast('名称不能为空');return}
-  const portStr=prompt('请输入 anytls 入站端口（10000-65535，须未占用）：','');
-  if(portStr===null)return;
-  const port=parseInt(portStr)||0;
-  if(port<1||port>65535){toast('端口必须在 1-65535');return}
-  toast('正在创建（生成凭证 + genconf + 重启 sing-box）…');
-  const j=await api('api/landings',{method:'POST',body:JSON.stringify({name:nameT,port})});
-  if(j.ok){toast('已创建落地服务「'+nameT+'」')}
-  else{toast(j.error||'创建失败');return}
-  loadLanding();
-}
-// 保存单个落地服务（全字段）
-async function saveLanding(p){
-  const rtype=$('#ld_'+p+'_rtype').value;
-  const body={
-    id:p,
-    name:$('#ld_'+p+'_name').value,
-    port:parseInt($('#ld_'+p+'_port').value)||0,
-    enabled:$('#ld_'+p+'_en').value==='true',
-    remote_enabled:$('#ld_'+p+'_ren').value==='true',
-    remote_type:rtype,
-	    remote_host:$('#ld_'+p+'_rhost').value,
-	    remote_port:parseInt($('#ld_'+p+'_rport').value)||0,
-	    password:$('#ld_'+p+'_pass').value,
-	  };
-
-  // 按远端类型取对应字段
-  if(rtype==='socks'){
-    body.remote_user=$('#ld_'+p+'_ruser').value;
-    body.remote_password=$('#ld_'+p+'_rpass2').value;
-  }else{
-    body.remote_method=$('#ld_'+p+'_rmethod').value;
-    body.remote_password=$('#ld_'+p+'_rpass').value;
-  }
-  toast('正在应用…（校验 + genconf + 重启 sing-box，约 3-5 秒）');
-  const j=await api('api/landings/update',{method:'POST',body:JSON.stringify(body)});
-	  if(j.ok){toast('已保存，sing-box 已重启');loadLanding()}
-	  else toast(j.error||'保存失败');
-	}
-
-// 重置某落地服务的 anytls 凭证
-async function regenLanding(p,btn){
-  if(!confirm('重置落地服务 #'+p+' 的凭证？（现有密码将失效，客户端需更新）'))return;
-  if(btn){const old=btn.textContent;btn.textContent='⏳';btn.disabled=true;
-  toast('正在重置凭证…');
-  const j=await api('api/landings/regen',{method:'POST',body:JSON.stringify({id:p})});
-  if(j.ok)toast('凭证已重置，sing-box 已重启');
-  else toast(j.error||'失败');
-  btn.textContent=old;btn.disabled=false;}
-  loadLanding();
-}
-// 删除落地服务
-async function deleteLanding(p){
-  if(!confirm('删除落地服务 #'+p+'？（凭证会一并清理，sing-box 将重启）'))return;
-  toast('正在删除…');
-  const j=await api('api/landings/delete',{method:'POST',body:JSON.stringify({id:p})});
-  if(j.ok)toast('已删除');
-  else{toast(j.error||'删除失败');return}
-  loadLanding();
-}
-
-// 证书（来源切换 + 续期/重新加载）
-// v1.5.32：Docker 手动模式 —— 用户填写宿主机真实路径，面板据此生成可复制的同步脚本。
-// 容器不直接读取宿主任意路径，证书经固定同步目录 /etc/ansgo-docker/manual-certs 导入 /etc/ssl/ansgo。
-function shq(s){return "'"+String(s==null?'':s).replace(/'/g,"'\\''")+"'"}
-function dockerManualSyncScript(full,key){
-  return '# ANS-GO Docker 手动证书同步（宝塔计划任务 / 系统定时任务均可）\n'+
-    '# 周期建议：每 15 分钟或每小时一次。证书未变化时容器内脚本不会重启服务。\n'+
-    'set -uo pipefail\n'+
-    'SRC_FULL='+shq(full)+'\n'+
-    'SRC_KEY='+shq(key)+'\n'+
-    'DST_DIR=/etc/ansgo-docker/manual-certs\n'+
-    'mkdir -p "$DST_DIR"\n'+
-    '[ -s "$SRC_FULL" ] || { echo "[ansgo] 证书不存在或为空: $SRC_FULL"; exit 1; }\n'+
-    '[ -s "$SRC_KEY" ]  || { echo "[ansgo] 私钥不存在或为空: $SRC_KEY"; exit 1; }\n'+
-    'install -m 0644 "$SRC_FULL" "$DST_DIR/fullchain.pem.tmp"\n'+
-    'install -m 0600 "$SRC_KEY"  "$DST_DIR/privkey.pem.tmp"\n'+
-    'mv -f "$DST_DIR/fullchain.pem.tmp" "$DST_DIR/fullchain.pem"\n'+
-    'mv -f "$DST_DIR/privkey.pem.tmp"  "$DST_DIR/privkey.pem"\n'+
-    '# ansgo-sync-manual-cert 退出码：0=未变化；10=已更新（需 reload）；非 0=失败\n'+
-    'docker exec ansgo /usr/local/bin/ansgo-sync-manual-cert\n'+
-    'rc=$?\n'+
-    '[ "$rc" = 0 ] && { echo "[ansgo] 证书未变化，跳过 reload"; exit 0; }\n'+
-    '[ "$rc" = 10 ] || { echo "[ansgo] 同步失败（退出码 $rc），保留旧证书不 reload"; exit "$rc"; }\n'+
-    'docker exec ansgo /usr/local/bin/ansgo-cert-reload\n'+
-    'echo "[ansgo] 证书已更新并 reload 三服务"\n';
-}
-function dockerManualCronInstallScript(full,key){
-  const sync=dockerManualSyncScript(full,key);
-  return '# 一键安装：写入同步脚本 + 系统定时任务（每 15 分钟），并立即执行一次\n'+
-    '# 在 Docker 宿主机以 root 执行一次即可\n'+
-    'set -euo pipefail\n'+
-    'cat > /usr/local/bin/ansgo-docker-sync-manual-cert <<\'ANSGO_EOF\'\n'+
-    sync+
-    'ANSGO_EOF\n'+
-    'chmod +x /usr/local/bin/ansgo-docker-sync-manual-cert\n'+
-    'cat > /etc/cron.d/ansgo-docker-manual-cert-sync <<\'CRON_EOF\'\n'+
-    '*/15 * * * * root /usr/local/bin/ansgo-docker-sync-manual-cert >/var/log/ansgo-docker-sync-manual-cert.log 2>&1\n'+
-    'CRON_EOF\n'+
-    'echo "[ansgo] 已安装系统定时任务 /etc/cron.d/ansgo-docker-manual-cert-sync"\n'+
-    '/usr/local/bin/ansgo-docker-sync-manual-cert\n';
-}
-function dockerManualTaskBlock(kind,title,script,btnHint){
-  const id='docker_sync_'+kind;
-  return `<div class="card" style="padding:12px;margin:8px 0;background:var(--card2)">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer" onclick="dockerSyncToggle('${id}')">
-      <span><b>${title}</b></span>
-      <span id="${id}_ico" style="color:var(--mut)">▶</span>
-    </div>
-    <div id="${id}_body" style="display:none;margin-top:10px">
-      <div class="help" style="margin:0 0 6px 0">${btnHint}</div>
-      <div class="uri-box" id="${id}_code" style="white-space:pre-wrap;word-break:normal;overflow-x:auto">${(script||'').replace(/</g,'&lt;')}</div>
-      <button class="mut" type="button" onclick="copy(($('#${id}_code').textContent))">📋 复制脚本</button>
-    </div>
-  </div>`;
-}
-function dockerSyncToggle(id){
-  const body=$('#'+id+'_body');const ico=$('#'+id+'_ico');
-  const open=body.style.display==='block';
-  body.style.display=open?'none':'block';
-  ico.textContent=open?'▶':'▼';
-}
-async function loadCert(){
-  const [c,cfg]=await Promise.all([api('api/cert'),api('api/cert/config')]);
-  const mode=cfg.mode||'acme';
-  const certRows=c.error?'':Object.entries(c).filter(([k])=>k!=='error').map(([k,v])=>`<tr><th>${{subject:'域名',issuer:'签发者',issuer_org:'签发机构',not_before:'生效',not_after:'到期',days_left:'剩余天数'}[k]||k}</th><td>${k==='days_left'?`<b style="color:${v<14?'var(--err)':'var(--ok)'}">${v} 天</b>`:v}</td></tr>`).join('');
-  const isAcme=mode==='acme';
-  const hostFull=cfg.host_fullchain||'';
-  const hostKey=cfg.host_privkey||'';
-  // v1.5.27：Dynu 凭证存在状态（GET 绝不回传明文，只回 boolean）
-  // v1.5.37：ACME 配置精简为「API Key + 邮箱」；OAuth（路径B）只显示兼容状态不提供输入
-  const dynu=cfg.dynu||{has_api_key:false,has_oauth:false};
-  const dynuState = dynu.has_api_key
-    ? '<span style="color:var(--ok)">✓ API Key 已配置（可签发/续期）</span>'
-    : dynu.has_oauth
-      ? '<span style="color:var(--warn,#ffc107)">△ OAuth 凭证兼容模式（可用，建议迁移 API Key）</span>'
-      : '<span style="color:var(--err)">✗ 未配置（manual 部署首次切 acme 需填写）</span>';
-  const akPh = dynu.has_api_key ? '（已配置，留空保留不变）' : 'Dynu 控制台 → API Keys';
-  // 旧 OAuth-only 部署的兼容迁移提示（后端 has_oauth 保留；已配 API Key 时不显示）
-  const oauthMigrate = (!dynu.has_api_key && dynu.has_oauth)
-    ? '<div class="help" style="margin:0 0 8px 0;color:var(--warn,#ffc107)">已检测到旧版 OAuth 凭证（Client ID + Secret，旧版 --dynu-client-id/--dynu-secret 部署）：签发/续期仍可用，暂无需改动。界面已精简为 API Key 方式，建议在 Dynu 控制台生成 API Key 后填入下方并保存完成迁移；旧 OAuth 凭证不会被删除。</div>'
-    : '';
-  // Docker 手动模式：同步脚本区（折叠）。依赖用户填写的宿主源路径，缺则给出占位示例。
-  // v1.5.37: 仅 Docker 形态渲染该容器；显隐=是否 manual 模式（模式下拉切换即时生效，
-  //   不必保存后才出现/消失）。裸金属不渲染。
-  const syncFull=hostFull||'/www/server/panel/vhost/cert/your-domain.com/fullchain.pem';
-  const syncKey=hostKey||'/www/server/panel/vhost/cert/your-domain.com/privkey.pem';
-  const dockerSyncBlocks=cfg.docker_mode?`<div id="docker_sync_wrap" style="display:${isAcme?'none':'block'};margin-top:10px;border-top:1px dashed var(--bd);padding-top:10px">
-      <div class="help" style="margin:0 0 8px 0">填写宿主机真实证书/私钥路径并保存后，复制下方脚本到宿主机执行，让证书自动同步到容器（例如宝塔/Nginx 已在续期的证书路径）。</div>
-      ${dockerManualTaskBlock('system','方案一：系统自动任务一键安装',dockerManualCronInstallScript(syncFull,syncKey),'SSH 在宿主机以 root 执行一次，会写入同步脚本与系统 cron（每 15 分钟），并立即同步一次。')}
-      ${dockerManualTaskBlock('bt','方案二：宝塔计划任务脚本',dockerManualSyncScript(syncFull,syncKey),'复制到宝塔面板「计划任务 → Shell 脚本」，周期建议每 15 分钟或每小时。证书未变化时容器内脚本不会重启服务。')}
-    </div>`:'';
-  $('#content').innerHTML=`<div class="card"><h3>📜 证书管理</h3>
-   <table>${certRows||'<tr><td colspan="2" style="color:var(--err)">'+(c.error||'无证书信息')+'</td></tr>'}</table>
-   <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
-   <div class="row"><label>证书来源</label><div class="f"><select id="cert_mode">
-     <option value="acme" ${isAcme?'selected':''}>acme 自动签发（Let's Encrypt + Dynu DNS-01）</option>
-     <option value="manual" ${!isAcme?'selected':''}>手动指定已有证书（自定义路径）</option>
-   </select></div></div>
-   <div id="manual_wrap" style="display:${isAcme?'none':'block'}">
-     ${cfg.docker_mode
-       ? '<div class="help" style="margin:6px 0">Docker 部署请填写<b>宿主机</b>上的证书/私钥真实路径（例如宝塔/Nginx 正在续期的路径）。ANS-GO 不会动态挂载任意宿主目录，而是通过固定同步目录 <code>/etc/ansgo-docker/manual-certs/</code> 导入证书，服务实际使用容器内 <code>'+(cfg.runtime_fullchain||'/etc/ssl/ansgo/fullchain.pem')+'</code> 与 <code>'+(cfg.runtime_privkey||'/etc/ssl/ansgo/privkey.pem')+'</code> 副本。</div>'
-         +'<div class="row"><label>宿主证书路径</label><div class="f"><input id="cert_host_fullchain" value="'+(hostFull)+'" placeholder="/www/server/panel/vhost/cert/your-domain.com/fullchain.pem"></div></div>'
-         +'<div class="row"><label>宿主私钥路径</label><div class="f"><input id="cert_host_privkey" value="'+(hostKey)+'" placeholder="/www/server/panel/vhost/cert/your-domain.com/privkey.pem"></div></div>'
-       : '<div class="help" style="margin:6px 0">手动模式下填写服务器上证书与私钥的<b>完整绝对路径</b>（如 <code>/etc/letsencrypt/live/example.com/fullchain.pem</code>）。面板、caddy、sing-box 都将改用这两个路径。</div>'
-         +'<div class="row"><label>证书文件路径</label><div class="f"><input id="cert_fullchain" value="'+(cfg.fullchain||'')+'" placeholder="/绝对路径/fullchain.pem"></div></div>'
-         +'<div class="row"><label>私钥文件路径</label><div class="f"><input id="cert_privkey" value="'+(cfg.privkey||'')+'" placeholder="/绝对路径/privkey.pem"></div></div>'}
-   </div>
-   <div id="acme_wrap" style="display:${isAcme?'block':'none'};border-top:1px dashed var(--bd);margin-top:14px;padding-top:10px">
-     <div class="row" style="align-items:flex-start"><label>Dynu 凭证</label><div class="f">
-       <div style="margin-bottom:6px">${dynuState}<span class="mut" style="font-size:12px;margin-left:8px">用于 DNS-01 验证签发与续期</span></div>
-       ${oauthMigrate}
-       <div class="help" style="margin:0 0 8px 0">填写 Dynu <b>API Key</b> 用于 DNS-01 验证签发与续期；凭证仅保存在本机配置文件（0600），不回传明文。首次以手动证书部署的服务器，切到 acme 自动签发前需先填写。已配置则留空表示保留不变。</div>
-       <div class="row"><label style="min-width:90px">API Key</label><div class="f"><input id="dynu_api_key" type="password" placeholder="${akPh}" autocomplete="off"></div></div>
-       <div class="row"><label style="min-width:90px">注册邮箱</label><div class="f"><input id="acme_email" value="${cfg.acme_email||''}" placeholder="留空用 admin@域名"></div></div>
-     </div></div>
-   </div>
-   ${dockerSyncBlocks}
-   <div style="margin-top:10px">
-     <button class="primary" onclick="saveCertConfig()">💾 保存来源设置</button>
-     <span id="cert_mode_pending" style="display:none;color:var(--warn,#ffc107);font-size:12px;margin-left:8px">已切换证书来源，需先「保存来源设置」生效后才可执行新模式的操作</span>
-     <span id="cert_ops_acme" style="display:${isAcme?'inline':'none'}">
-       <button class="mut" style="margin-left:8px" onclick="certIssue()">🚀 立即签发证书</button><button class="mut" style="margin-left:8px" onclick="certRenew()">🔄 手动续期</button><span class="mut" style="margin-left:8px;font-size:12px">「立即签发」用于切换来源/补凭证后首次签发；「手动续期」更新即将到期证书。</span>
-     </span>
-     <span id="cert_ops_manual" style="display:${isAcme?'none':'inline'}">
-       ${cfg.docker_mode
-         ?'<button class="mut" style="margin-left:8px" onclick="certReload()">🔄 同步并重新加载证书</button><span class="mut" style="margin-left:8px;font-size:12px">手动模式：从宿主同步目录导入证书并重启三服务（需先执行上方同步脚本）。</span>'
-         :'<button class="mut" style="margin-left:8px" onclick="certReload()">🔄 重新加载证书</button><span class="mut" style="margin-left:8px;font-size:12px">手动模式：在服务器替换证书后点此重新加载三服务。</span>'}
-     </span>
-   </div>
-   <div class="help" style="margin-top:12px">⚠️ 切换来源或改路径会让面板自身也重启（TLS 证书变了），届时会断开需重新登录。「立即签发」耗时约 1-3 分钟（DNS-01），请耐心等待。</div></div>`;
-  $('#cert_mode').onchange=()=>{
-    const m=$('#cert_mode').value;
-    $('#manual_wrap').style.display=m==='manual'?'block':'none';
-    $('#acme_wrap').style.display=m==='acme'?'block':'none';
-    // v1.5.37: 宿主证书同步脚本区随模式下拉即时显隐（仅 Docker 形态渲染了该容器；
-    //   manual 显示 / acme 隐藏，无需保存）
-    const sw=$('#docker_sync_wrap');
-    if(sw)sw.style.display=(m==='manual')?'block':'none';
-    // v1.5.37: 模式相关操作按「下拉值 === 已保存模式」显示——未保存的切换把签发/续期
-    // 与重载操作全部隐藏（不允许执行与当前选择不符的旧模式操作），并提示先保存来源；
-    // 保存成功后 loadCert 按最新已存模式重新渲染（mode 为本函数闭包里的已保存值）
-    const pending=(m!==mode);
-    const opsA=$('#cert_ops_acme'),opsM=$('#cert_ops_manual'),pend=$('#cert_mode_pending');
-    if(opsA)opsA.style.display=(!pending&&m==='acme')?'inline':'none';
-    if(opsM)opsM.style.display=(!pending&&m==='manual')?'inline':'none';
-    if(pend)pend.style.display=pending?'inline':'none';
-  };
-}
-async function saveCertConfig(){
-  const mode=$('#cert_mode').value;
-  const body={mode};
-  const dockerManual=(await api('api/cert/config')).docker_mode;
-  if(mode==='manual'){
-    if(dockerManual){
-      body.host_fullchain=$('#cert_host_fullchain')?$('#cert_host_fullchain').value:'';
-      body.host_privkey=$('#cert_host_privkey')?$('#cert_host_privkey').value:'';
-    }else{
-      body.fullchain=$('#cert_fullchain').value;body.privkey=$('#cert_privkey').value
-    }
-  }else{
-    // v1.5.27：acme 模式一并提交 Dynu 凭证（仅收集非空字段，后端按 nil 判断=保留不变）
-    // v1.5.37：界面精简，只提交 API Key 与邮箱；OAuth（client_id/secret）不再收集提交
-    //   ——后端字段仍兼容（不传=保留旧值），旧 OAuth 部署的续期不受影响。
-    //   元素读取防御（v1.5.22 教训）：条件渲染/已移除的输入框可能不存在
-    const akEl=$('#dynu_api_key');
-    const ak=akEl?akEl.value.trim():'';
-    const emailEl=$('#acme_email');
-    const email=emailEl?emailEl.value.trim():'';
-    if(ak!=='')body.dynu_api_key=ak;
-    body.acme_email=email;
-  }
-  if(!confirm('保存证书来源设置？面板及三服务将重启，会断开连接。'))return;
-  toast('正在保存…（三服务将重启）');
-  const j=await api('api/cert/config',{method:'POST',body:JSON.stringify(body)});
-  if(j.ok&&j.new_url){showRestartOverlay(j.msg||'证书设置已保存，面板即将重启',j.new_url,j.restart_in||3);return}
-  // v1.5.37: 保存成功后总是重渲染——按最新已存模式显示正确的签发/续期或重载操作
-  if(j.ok){toast('已保存');loadCert()}
-  else toast(j.error||'保存失败');
-}
-
-async function certIssue(){
-  if(!confirm('立即签发证书？将通过 Dynu DNS-01 向 Let\'s Encrypt 申请，耗时约 1-3 分钟，期间不要关闭页面。'))return;
-  toast('正在签发…（DNS-01 验证，约 1-3 分钟）');
-  const j=await api('api/cert/issue',{method:'POST'});
-  if(j.ok){toast('证书签发完成');loadCert()}
-  else{toast(j.msg||j.error||'签发失败');if(j.log){console.log('cert issue log:\n'+j.log)}}
-}
-async function certReload(){
-  if(!confirm('重新加载证书？caddy/sing-box/面板都会重启，会断开连接。'))return;
-  toast('正在重新加载…');
-  const j=await api('api/cert/reload',{method:'POST'});
-  if(j.ok&&j.new_url){showRestartOverlay(j.msg||'证书已重新加载',j.new_url,j.restart_in||3);return}
-  if(j.ok)toast('已重新加载');
-  else toast(j.error||'失败');
-}
-async function certRenew(){
-  if(!confirm('手动触发证书续期？续期后三服务会自动 reload。'))return;
-  toast('正在续期…（可能需要 1-2 分钟）');
-  const j=await api('api/cert/renew',{method:'POST'});
-  if(j.ok){toast('续期完成');loadCert()}else toast(j.error||'续期失败，查看日志');
-}
-
-// 设置
-async function loadSet(){
-  const j=await api('api/settings');
-  if(j.error)return $('#content').innerHTML=j.error;
-  const f=(id,lbl,val,ph='',type='text')=>`<div class="row"><label>${lbl}</label><div class="f"><input id="s_${id}" type="${type}" value="${val??''}" placeholder="${ph}"></div></div>`;
-  // v1.5.18：server_ip 行（带「🔍 自动检测」按钮 + hint 提示）
-  const ipHint=j.server_ip_hint?`<div class="help" style="margin:4px 0 0 0;color:var(--warn,#ffc107)">⚠️ ${j.server_ip_hint}</div>`:'';
-  const ipResolved=j.server_ip_resolved?`<div class="help" style="margin:4px 0 0 0">当前生效连接地址：<code>${j.server_ip_resolved}</code>${j.server_ip?'（手动填写）':'（自动探测）'}</div>`:'';
-  $('#content').innerHTML=`<div class="card"><h3>⚙️ 面板设置</h3>
-   ${f('panel_title','节点信息',j.panel_title,'例如 NodeName（浏览器标题与节点名称基础名）')}
-   ${f('url_path','URL 路径',j.url_path,'/xxxx/')}
-   ${f('admin_user','管理员用户名',j.admin_user,'')}
-   ${f('admin_pass','新密码(留空不改)','','留空表示不修改','password')}
-   ${f('session_hours','会话时长(小时)',j.session_hours,'','number')}
-   ${f('panel_port','面板端口',j.panel_port,'','number')}
-   ${f('login_lock_threshold','锁定阈值(次)',j.login_lock_threshold,'','number')}
-   ${f('login_lock_minutes','锁定时长(分钟)',j.login_lock_minutes,'','number')}
-   <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
-   <div class="row"><label>服务器公网 IP</label><div class="f field-inline">
-     <input id="s_server_ip" type="text" value="${j.server_ip??''}" placeholder="留空则自动探测（VPC 网络必填）">
-     <button class="mut" type="button" onclick="detectPublicIP(this)">🔍 自动检测</button>
-   </div></div>
-   <div class="help" style="margin:0 0 4px 0">节点信息「连接地址」显示此 IP。<b>首次留空时面板会在启动时自动查询公网 IP 并保存</b>（仅一次，已有值不再覆盖）；手动填写则始终以手动值为准。VPC/NAT 多出口网络下自动查询的出口 IP 可能与实际连接入口不同，建议手动填写或点「🔍 自动检测」确认后保存。</div>
-   ${ipHint}${ipResolved}
-   <div class="help" style="margin:6px 0 0 0">「节点信息」用作浏览器标题与各服务节点名称的基础名：浏览器标题为 <code>&lt;节点信息&gt;_ANS</code>，节点 URI 名称为 <code>&lt;节点信息&gt;-AT/NV/SS/SK</code>。留空或保持默认则显示 <code>Manage</code>。</div>
-   <div style="border-top:1px solid var(--bd);margin:14px 0;padding-top:14px"></div>
-   <div class="help" style="margin:0 0 10px 0">域名伪装站点（格式 <code>proxy:https://站点</code> 反代，或 <code>page</code> 用默认页）。保存后 caddy 自动重载。</div>
-   ${(j.caddy_enable==='true')?f('disguise_panel','直访伪装(:443)',j.disguise_panel,'proxy:https://example.com'):'<div class="row"><label>直访伪装(:443)</label><div class="f"><span class="mut" style="font-size:12px">已禁用（--no-caddy 模式，:443 由现有 web 服务器接管）</span></div></div>'}
-   ${f('disguise_naive','Naive伪装(代理端口)',j.disguise_naive,'proxy:https://example.com')}
-   <div style="margin-top:6px"><button class="primary" onclick="saveSet()">💾 保存设置</button>
-   <span class="mut" style="font-size:12px;margin-left:8px">改 URL 路径或面板端口会重启面板；改伪装站点会重载 caddy。</span></div>
-   <div class="help" style="margin-top:12px">当前协议端口 — AnyTLS: ${j.anytls_port} / Naive: ${j.naive_port} / SS: ${j.ss_port} / SOCKS5: ${j.socks_port}（在"端口管理"修改）</div></div>`;
-  // v1.5.37b(Sentinel)：记录 server_ip 表单初值——saveSet 据此判断「初值为空且未编辑」，
-  // 此时跳过提交该字段，避免空表单回显抹掉面板启动时自动探测并保存的 IP
-  const _ipEl=$('#s_server_ip');
-  if(_ipEl)_ipEl.dataset.initial=j.server_ip??'';
-}
-// v1.5.18：主动检测公网 IP（用户点击才外发一次第三方 API，结果填入输入框供确认保存，不直接写配置）
-async function detectPublicIP(btn){
-  const old=btn.textContent;
-  btn.textContent='⏳ 检测中…';btn.disabled=true;
-  try{
-    const j=await api('api/detect-public-ip');
-    if(j.ok&&j.ip){
-      const el=$('#s_server_ip');
-      if(el){el.value=j.ip;el.focus()}
-      toast('检测到公网 IP: '+j.ip+'（需点「💾保存设置」生效）');
-    }else{
-      toast(j.error||'检测失败');
-    }
-  }catch(e){toast('检测失败：'+e.message)}
-  btn.textContent=old;btn.disabled=false;
-}
-async function saveSet(){
-  // v1.5.22: g() 防御元素缺失（如 --no-caddy 模式下 s_disguise_panel 不渲染），
-  // 返回空串而非抛 TypeError 中断整个保存（旧版会在该场景下「点保存无反应」）。
-  const g=id=>{const e=$('#s_'+id);return e?e.value:''};
-  const body={panel_title:g('panel_title'),url_path:g('url_path'),admin_user:g('admin_user'),session_hours:parseInt(g('session_hours')),panel_port:parseInt(g('panel_port')),login_lock_threshold:parseInt(g('login_lock_threshold')),login_lock_minutes:parseInt(g('login_lock_minutes')),disguise_panel:g('disguise_panel'),disguise_naive:g('disguise_naive')};
-  // v1.5.37b(Sentinel)：server_ip 初值为空且用户未编辑时不提交该字段——防止空表单回显
-  // 抹掉面板启动时自动探测保存的 IP；用户输入/「自动检测」填入（值变化）与显式清空照常提交
-  const ipEl=$('#s_server_ip');
-  if(ipEl){
-    const ipVal=ipEl.value, ipInit=(ipEl.dataset&&ipEl.dataset.initial!==undefined)?ipEl.dataset.initial:'';
-    if(!(ipInit===''&&ipVal===''))body.server_ip=ipVal;
-  }
-  if(g('admin_pass'))body.admin_pass=g('admin_pass');
-  // 只传发生变化的字段由后端处理；这里全传，后端按指针判断（空串/0 会触发改动）
-  const j=await api('api/settings',{method:'POST',body:JSON.stringify(body)});
-  if(j.ok){
-    if(j.new_url){showRestartOverlay(j.msg||'面板即将重启',j.new_url,3);return}
-    document.title=panelDisplayTitle(body.panel_title);toast('设置已保存');
-  }else toast(j.error||'保存失败');
-}
-
-// 日志
-function loadLog(){
-  $('#content').innerHTML=`<div class="card"><h3>📃 日志查看</h3>
-   <div class="row"><label>服务</label><div class="f"><select id="log_svc"><option value="naive">NaiveProxy(caddy)</option><option value="socks">SOCKS5(sing-box)</option><option value="ss">SS/AnyTLS(sing-box)</option><option value="panel">面板(ansgo-panel)</option></select></div>
-   <button class="primary" onclick="loadLogData()">刷新</button></div>
-   <div class="logs" id="logbox">请选择服务并刷新</div></div>`;
-}
-async function loadLogData(){
-  const s=$('#log_svc').value;$('#logbox').textContent='加载中…';
-  const j=await api('api/logs?target='+s+'&n=200');
-  $('#logbox').textContent=j.logs||j.error||'(空)';
-}
-
-// 自重启覆盖层（倒计时）
-function showRestartOverlay(msg,url,sec){
-  let n=sec;
-  $('#obox').innerHTML=`<h2>🔄 即将重启面板</h2><div style="color:var(--mut);font-size:13px">${msg}</div><div class="count" id="cnt">${n}</div><a href="${url}" style="display:inline-block;margin-top:8px"><button class="primary">立即前往新地址</button></a>`;
-  $('#overlay').style.display='flex';
-  const t=setInterval(()=>{n--;const e=$('#cnt');if(e)e.textContent=n;if(n<=0){clearInterval(t);location.href=url}},1000);
-}
-
-document.getElementById('lp').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
-document.getElementById('lu').addEventListener('keydown',e=>{if(e.key==='Enter')$('#lp').focus()});
-checkAuth();
-// 主题切换（localStorage 记忆）
-function applyTheme(t){document.documentElement.setAttribute('data-theme',t);const b=$('#themeBtn');if(b)b.textContent=t==='light'?'☀️':'🌙'}
-function toggleTheme(){const cur=document.documentElement.getAttribute('data-theme')||'dark';const nw=cur==='dark'?'light':'dark';localStorage.setItem('ansgo_theme',nw);applyTheme(nw)}
-applyTheme(localStorage.getItem('ansgo_theme')||'dark');
-// 恢复侧边栏折叠状态（仅桌面端）
-(function(){const v=localStorage.getItem('ansgo_sidebar');if(v==='collapsed'&&!isMobile()){const s=$('#sidebar');s.classList.add('collapsed');$('#collapseIco').textContent='▶';$('#collapseLbl').textContent='展开'}})();
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(!$('#overlay').hidden)closeOverlay();else if($('#sidebar').classList.contains('open')){closeSidebar();$('#menuBtn').focus()}}const trap=!$('#overlay').hidden?$('#obox'):mobileMedia.matches&&$('#sidebar').classList.contains('open')?$('#sidebar'):null;if(e.key==='Tab'&&trap){const buttons=[...trap.querySelectorAll('button,input,select')].filter(b=>!b.disabled&&b.getClientRects().length),first=buttons[0],last=buttons.at(-1);if(!first){e.preventDefault();return}if(e.shiftKey&&(document.activeElement===first||document.activeElement===trap)){last.focus();e.preventDefault()}else if(!e.shiftKey&&(document.activeElement===last||document.activeElement===trap)){first.focus();e.preventDefault()}}});
+window.addEventListener('beforeunload',e=>{if(!modalLocked&&(dirtyForms()||busyForms())){e.preventDefault();e.returnValue=''}});
+window.addEventListener('error',e=>toast('页面错误：'+e.message));
+applyTheme(stored('ansgo_theme','dark'));setCollapsed(stored('ansgo_sidebar','expanded')==='collapsed');checkAuth();
 </script>
 </body>
 </html>
