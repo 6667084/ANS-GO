@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO install.sh 新参数与初始化链路测试（v1.5.37，TDD）
+# ANS-GO install.sh 新参数与初始化链路测试（v1.6.0 契约，TDD）
 #
 # 覆盖：
 #   1. --panel-title / --server-ip 参数解析 + 校验（危险字符/格式/长度拒绝）
@@ -8,7 +8,7 @@
 #   3. 裸金属 panel.json 生成函数（JSON 转义 / 默认旧语义 / 已有文件不覆盖）
 #   4. Docker ansgo.env 生成函数（env 特殊字符语义：两种 dotenv 解析器还原）
 #
-# 隔离性：全程非 root（install.sh 走到 root 校验即退出，无下载/安装副作用）；
+# 隔离性：探针模拟非 root（install.sh 走到 root 校验即退出，无下载/安装副作用）；
 #         生成函数经提取 + 路径参数输出到临时目录，不触碰系统路径。
 # 用法：bash scripts/test-install-params.sh   （在仓库根目录或任意目录均可）
 # =============================================================================
@@ -17,6 +17,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL="$ROOT/install.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/probe-bin"
+cat > "$TMP/probe-bin/id" <<'SH'
+#!/bin/bash
+printf '65534\n'
+SH
+chmod +x "$TMP/probe-bin/id"
 PASS=0 FAIL=0
 ok(){ PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 no(){ FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; }
@@ -34,7 +40,7 @@ extract_fn(){
 # ---- 探针运行：NONINT + 齐全参数 → 应顺利走到「需 root 运行」环境校验退出 ----
 # （到达该输出 = 参数被接受、校验通过、交互收集不再阻塞；全程无副作用）
 run_probe(){
-  bash "$INSTALL" --domain your-domain.com --dynu-key fake-key-for-test \
+  PATH="$TMP/probe-bin:$PATH" bash "$INSTALL" --domain your-domain.com --dynu-key fake-key-for-test \
     --email t@example.com --non-interactive "$@" 2>&1
 }
 
@@ -50,7 +56,7 @@ OUT="$(run_probe --panel-title NodeB --server-ip 999.1.1.1)"
 if printf '%s' "$OUT" | grep -q -- '--server-ip'; then ok "--server-ip=999.1.1.1 被校验拒绝"; else no "--server-ip=999.1.1.1 未被拒绝"; fi
 OUT="$(run_probe --panel-title NodeB --server-ip not-an-ip)"
 if printf '%s' "$OUT" | grep -q -- '--server-ip'; then ok "--server-ip=not-an-ip 被校验拒绝"; else no "--server-ip=not-an-ip 未被拒绝"; fi
-# v1.5.37 修订：无效 IPv6 必须拒绝（三连冒号/仅冒号/双::/前后单冒号/超长组/非hex）
+# v1.6.0 契约：无效 IPv6 必须拒绝（三连冒号/仅冒号/双::/前后单冒号/超长组/非hex）
 for BAD_IP in '2001:::1' ':::' ':' ':::1' '1::2::3' ':2001:db8::1' '2001:db8::1:' 'gg::1' '12345::' '1.2.3' '::ffff:1.2.3.4x'; do
   OUT="$(run_probe --panel-title NodeB --server-ip "$BAD_IP")"
   if printf '%s' "$OUT" | grep -q -- '--server-ip'; then ok "--server-ip=$BAD_IP 被校验拒绝"; else no "--server-ip=$BAD_IP 未被拒绝（须严格 IPv6 解析）"; fi
@@ -60,7 +66,7 @@ for OK_IP in '::' '::1' 'fe80::1' '::ffff:1.2.3.4'; do
   OUT="$(run_probe --panel-title NodeB --server-ip "$OK_IP")"
   if printf '%s' "$OUT" | grep -q '需 root 运行'; then ok "--server-ip=$OK_IP 被接受"; else no "--server-ip=$OK_IP 被误拒"; fi
 done
-# v1.5.37 修订：特殊字符标题属合法可读输入（Docker 侧 percent-encoding transport），必须接受
+# v1.6.0 契约：特殊字符标题属合法可读输入（Docker 侧 percent-encoding transport），必须接受
 for OK_TITLE in 'a$b' 'a#b' 'a"b' "a'b" 'a\b' 'a`b' 'a b' '100%正品' '节点 A（京'; do
   OUT="$(run_probe --panel-title "$OK_TITLE" --server-ip 203.0.113.7)"
   if printf '%s' "$OUT" | grep -q '需 root 运行'; then ok "--panel-title 特殊字符 '$OK_TITLE' 被接受（ENCODED transport）"; else no "--panel-title '$OK_TITLE' 被拒绝（应走编码而非拒绝）"; fi
@@ -99,7 +105,7 @@ else
 fi
 
 echo "== G2 可测函数可提取（fnname(){ ... 顶格} 约定）=="
-for FN in ansgo_json_escape ansgo_pct_encode ansgo_ip_check metal_ensure_panel_json docker_gen_ansgo_env; do
+for FN in ansgo_json_escape ansgo_pct_encode ansgo_ip_check ansgo_verify_elf metal_ensure_panel_json docker_gen_ansgo_env; do
   DEF="$(extract_fn "$INSTALL" "$FN")"
   if [ -n "$DEF" ] && printf '%s' "$DEF" | tail -1 | grep -q '^}$'; then ok "install.sh 可提取函数 ${FN}"; else no "install.sh 无法提取函数 ${FN}（不存在或格式不符）"; fi
 done
@@ -187,9 +193,11 @@ assert json.load(open('$J'))['panel_title']=='NodeB'
 
   # 失败路径 1：目标目录不可写 → 必须失败（非 0）、无输出文件、无 .tmp 残留
   RO="$TMP/rodir"; mkdir -p "$RO"; chmod 500 "$RO"
-  PANEL_TITLE_IN=NodeB SERVER_IP_IN='' metal_ensure_panel_json "$RO/x.json" 2>"$TMP/ro.err"; RRC=$?
+  # root 无视 DAC 权限；用父路径为普通文件制造稳定失败。
+  printf x > "$TMP/notdir"
+  PANEL_TITLE_IN=NodeB SERVER_IP_IN='' metal_ensure_panel_json "$TMP/notdir/x.json" 2>"$TMP/ro.err"; RRC=$?
   chmod 700 "$RO" 2>/dev/null
-  if [ "$RRC" -ne 0 ] && [ ! -f "$RO/x.json" ] && ! ls "$RO"/*.tmp* >/dev/null 2>&1; then
+  if [ "$RRC" -ne 0 ] && [ ! -f "$RO/x.json" ] && ! ls "$TMP"/*.tmp* >/dev/null 2>&1; then
     ok "目录不可写：失败不被吞（rc=${RRC}），无输出/无 tmp 残留"
   else
     no "目录不可写时失败被吞（rc=${RRC}）或残留 tmp"

@@ -27,28 +27,25 @@ WORKDIR /src
 COPY deploy/panel/go.mod deploy/panel/go.sum ./
 RUN go mod download
 COPY deploy/panel/ .
-# v1.5.36：默认值与 main.go 的 version 一致；CI/buildx 应通过 --build-arg PANEL_VERSION 覆盖
-ARG PANEL_VERSION=1.5.36
+# 默认值与 main.go 的 version 一致；CI/buildx 应通过 --build-arg PANEL_VERSION 覆盖
+ARG PANEL_VERSION=1.6.0
 RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags "-s -w -X main.version=${PANEL_VERSION}" -o /out/ansgo-panel .
 
-# ---- Stage 2: xcaddy 编译 caddy-naive（forwardproxy naive 分支）----
-# klzgrad/forwardproxy 只发源码，且 naive 分支 go.mod 的 module path 仍为
-# github.com/caddyserver/forwardproxy（fork 未改 path），故先 git clone 到本地，
-# 再用 xcaddy --with <module>=<本地目录> 注入，绕过下载与 module path 冲突。
-FROM golang:1.26-alpine AS caddy
-RUN apk add --no-cache git
-RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-RUN export https_proxy=${HTTPS_PROXY:-} http_proxy=${HTTP_PROXY:-} && \
-    git clone -b naive --depth 1 https://github.com/klzgrad/forwardproxy.git /fp
-RUN mkdir -p /out && CGO_ENABLED=0 \
-    xcaddy build --with github.com/caddyserver/forwardproxy=/fp --output /out/caddy
+# ---- Stage 2: 与 release 使用同一份固定 caddy-naive 资产 ----
+FROM debian:bookworm-slim AS caddy
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /out && ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL --retry 3 "https://github.com/6667084/ANS-GO/releases/download/v1.5.16/caddy-naive-linux-${ARCH}" -o /out/caddy \
+    && chmod 755 /out/caddy \
+    && /out/caddy list-modules | grep -Fq "http.handlers.forward_proxy"
 
 # ---- Stage 3: 下载 sing-box（SagerNet 官方 release，按 dpkg 架构）----
 FROM debian:bookworm-slim AS singbox
 ARG SINGBOX_VER=1.13.13
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tar \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 # 构建平台原生架构（dpkg 输出 amd64/arm64，匹配 SagerNet 命名）
 RUN mkdir -p /out && SB=$(dpkg --print-architecture) \
     && curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${SB}.tar.gz" \
@@ -71,7 +68,7 @@ LABEL org.opencontainers.image.source="https://github.com/6667084/ANS-GO" \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus udev \
       curl ca-certificates openssl socat jq python3 procps iproute2 cron \
-    && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/docker-clean \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/docker-clean \
     && rm -f /etc/systemd/system/*.wants/* /etc/systemd/system/multi-user.target.wants/* \
     && rm -f /lib/systemd/system/multi-user.target.wants/getty.target
 
@@ -84,10 +81,10 @@ RUN find /lib/systemd/system /usr/lib/systemd/system \
          -o -name 'systemd-localed*' -o -name 'systemd-timedated*' -o -name 'ssh*' \) \
       -exec rm -f {} + || true
 
-# journald：容器内用 volatile（内存）存储 + 限 20M，与裸金属"限 50M"理念一致
+# 项目 journald 限额；不占用用户 size.conf 文件名。
 RUN mkdir -p /etc/systemd/journald.conf.d && \
-    printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=20M\nSystemMaxUse=20M\nForwardToConsole=no\n' \
-      > /etc/systemd/journald.conf.d/size.conf
+    printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=16M\nSystemMaxUse=50M\nSystemMaxFileSize=10M\nMaxRetentionSec=14day\nCompress=yes\nForwardToConsole=no\n' \
+      > /etc/systemd/journald.conf.d/60-ansgo.conf
 
 # 默认目标 = multi-user（无图形）
 RUN ln -sf /lib/systemd/system/multi-user.target /etc/systemd/system/default.target
@@ -101,28 +98,33 @@ COPY --from=panel   /out/ansgo-panel /usr/local/bin/ansgo-panel
 # v1.5.35: SCRIPTS_BUST 让 buildx 在脚本内容变化时强制重建本层（默认空，CI 可传 --build-arg SCRIPTS_BUST=$(md5sum deploy/ansgo-*)）
 ARG SCRIPTS_BUST=""
 RUN echo "$SCRIPTS_BUST" > /dev/null
-COPY deploy/ansgo-admin deploy/ansgo-genconf deploy/ansgo-cert-reload \
+COPY deploy/ansgo-admin deploy/ansgo-genconf deploy/ansgo-cert-reload deploy/ansgo-limits \
      deploy/ansgo-sync-manual-cert \
      deploy/ansgo-cert-issue.sh deploy/dns_dynukey.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/ansgo-admin /usr/local/bin/ansgo-genconf \
+COPY deploy/upgrade.sh /usr/local/bin/ansgo-upgrade
+RUN chmod +x /usr/local/bin/ansgo-limits /usr/local/bin/ansgo-upgrade /usr/local/bin/ansgo-admin /usr/local/bin/ansgo-genconf \
              /usr/local/bin/ansgo-cert-reload /usr/local/bin/ansgo-sync-manual-cert \
              /usr/local/bin/ansgo-cert-issue.sh \
              /usr/local/bin/dns_dynukey.sh
 # ansgo-cert-issue.sh 会从 /etc/ansgo-deploy/ 拷 reload 钩子，预置一份
 RUN mkdir -p /etc/ansgo-deploy && \
-    cp /usr/local/bin/ansgo-cert-reload /etc/ansgo-deploy/ && \
+    cp /usr/local/bin/ansgo-cert-reload /usr/local/bin/ansgo-cert-issue.sh /etc/ansgo-deploy/ && \
     cp /usr/local/bin/dns_dynukey.sh /etc/ansgo-deploy/
 
 # ---- systemd unit（与裸金属完全相同）----
 COPY deploy/systemd/sing-box.service deploy/systemd/caddy.service /etc/systemd/system/
 COPY deploy/ansgo-panel.service /etc/systemd/system/
+# timer 仅裸金属支持，镜像不启用自动升级。
+ARG PANEL_VERSION=1.6.0
+RUN mkdir -p /usr/local/share && printf 'v%s\n' "$PANEL_VERSION" > /usr/local/share/ansgo-version
 # 容器内 drop-in：解除 network-online.target 依赖（容器无 networkd，否则该 target 永不 active）
 RUN for s in caddy sing-box ansgo-panel; do \
       mkdir -p /etc/systemd/system/$s.service.d; \
       printf '[Unit]\nAfter=\nWants=\n' > /etc/systemd/system/$s.service.d/no-netdep.conf; \
     done
 # enable caddy(:443伪装) + ansgo-panel；sing-box 不 enable（面板内按需安装）
-RUN ln -sf /etc/systemd/system/caddy.service      /etc/systemd/system/multi-user.target.wants/caddy.service && \
+RUN ln -sf /lib/systemd/system/cron.service /etc/systemd/system/multi-user.target.wants/cron.service && \
+    ln -sf /etc/systemd/system/caddy.service      /etc/systemd/system/multi-user.target.wants/caddy.service && \
     ln -sf /etc/systemd/system/ansgo-panel.service /etc/systemd/system/multi-user.target.wants/ansgo-panel.service
 
 # ---- entrypoint ----
@@ -130,7 +132,7 @@ COPY deploy/docker/entrypoint.sh /usr/local/bin/ansgo-entrypoint
 RUN chmod +x /usr/local/bin/ansgo-entrypoint
 
 # 持久化目录占位（实际由 volume 覆盖）
-RUN mkdir -p /etc/ansgo /etc/ssl/ansgo /etc/sing-box /etc/caddy /var/www/html /root/.acme.sh /var/log
+RUN mkdir -p /etc/ansgo /etc/ssl/ansgo /etc/sing-box /etc/caddy /var/www/html /root/.acme.sh /var/log/ansgo
 
 # host 网络：端口直连宿主
 EXPOSE 80 443 15608 23456 8443 10808 33899 44333 21111 21112

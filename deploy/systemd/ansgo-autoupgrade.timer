@@ -1,0 +1,11 @@
+[Unit]
+Description=ANS-GO weekly upgrade schedule (disabled by default)
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+Unit=ansgo-autoupgrade.service
+
+[Install]
+WantedBy=timers.target

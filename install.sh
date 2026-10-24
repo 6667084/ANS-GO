@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.5.37
+# ANS-GO 一键部署脚本 (install.sh)   v1.6.0
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -8,7 +8,7 @@
 #           bash install.sh --uninstall --purge   # 彻底删除配置/卷/镜像
 #
 # 所有资源取自本仓库 GitHub / 官方上游：
-#   脚本/源码    -> raw.githubusercontent.com/6667084/ANS-GO/main/deploy/
+#   脚本/源码    -> raw.githubusercontent.com/6667084/ANS-GO/v1.6.0/deploy/
 #   面板二进制    -> github.com/6667084/ANS-GO/releases/download/$VER/ansgo-panel-linux-<arch>
 #   sing-box      -> SagerNet 官方 release（多架构）
 #   caddy(naive) -> klzgrad/forwardproxy 源码 + xcaddy 编译（Docker 内）或本项目预编译产物
@@ -31,7 +31,8 @@ _ansi_self="${BASH_SOURCE[0]:-}"
 case "$_ansi_self" in
   "" | /dev/fd/* | /proc/self/fd/*)
     # 来自管道或进程替换：落地到临时文件后 exec 重跑（保留所有原参数）
-    _ansi_tmp="$(mktemp 2>/dev/null || mktemp -t ansgo)"
+    _ansi_dir="$(mktemp -d)" || exit 1
+    _ansi_tmp="$_ansi_dir/install.sh"
     # 注意：进程替换下 BASH_SOURCE=/dev/fd/NN，但 [ -f ] 对 fd 返回 false（非常规文件），
     #   必须用 [ -e ] 判断；且脚本内容在 /dev/fd/NN 里，不在 stdin(fd0=用户终端)。
     #   管道模式下 BASH_SOURCE 为空，脚本内容在 stdin，必须 cat 从 stdin 读。
@@ -45,22 +46,29 @@ case "$_ansi_self" in
     # 落地失败则继续从管道执行（退化为旧行为，不至于卡死）
     if [ -s "$_ansi_tmp" ]; then
       chmod +rx "$_ansi_tmp" 2>/dev/null
-      # 标记让新脚本退出时清理自身（避免 /tmp 残留）
       export _ANSGO_BOOTSTRAP_TMP="$_ansi_tmp"
+      export _ANSGO_BOOTSTRAP_DIR="$_ansi_dir"
       exec bash "$_ansi_tmp" "$@"
     fi
-    rm -f "$_ansi_tmp" 2>/dev/null
+    rm -rf "$_ansi_dir" 2>/dev/null
     ;;
 esac
 unset _ansi_self _ansi_tmp
 # ---- bootstrap end ----
 
 set -uo pipefail
+umask 077
 
-# bootstrap 落地模式：退出时清理临时文件（仅 curl|bash 形式产生，文件模式不触发）
-if [ -n "${_ANSGO_BOOTSTRAP_TMP:-}" ] && [ -f "$_ANSGO_BOOTSTRAP_TMP" ]; then
-  trap 'rm -f "$_ANSGO_BOOTSTRAP_TMP" 2>/dev/null' EXIT
-fi
+WORK="" BIN_STAGE="" APT_READY=0
+install_cleanup(){
+  [ -z "$WORK" ] || rm -rf "$WORK"
+  [ -z "$BIN_STAGE" ] || rm -rf "$BIN_STAGE"
+  [ -z "${_ANSGO_BOOTSTRAP_DIR:-}" ] || rm -rf "$_ANSGO_BOOTSTRAP_DIR"
+  [ "$APT_READY" = 0 ] || { command -v apt-get >/dev/null && apt-get clean || true; }
+}
+trap install_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # curl | bash 管道形式下，bash 的 stdin(fd0) 被 curl 输出占用。若用 exec 0</dev/tty
 # 全局切走 fd0，bash 会读不到脚本剩余部分（管道还在喂脚本）→ 后续代码全部不执行。
@@ -78,9 +86,9 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 }
 
 REPO="6667084/ANS-GO"
-RAW="https://raw.githubusercontent.com/${REPO}/main/deploy"
+RAW="https://raw.githubusercontent.com/${REPO}/v1.6.0/deploy"
 REL="https://github.com/${REPO}/releases/download"
-VER="v1.5.37"         # 面板二进制 release tag（install.sh 脚本本体 v1.5.37：--panel-title/--server-ip 安装参数 + ACME 引导精简）
+VER="v1.6.0"         # 面板二进制 release tag（install.sh 脚本本体 v1.6.0：--panel-title/--server-ip 安装参数 + ACME 引导精简）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -100,7 +108,7 @@ CERT_MODE="acme" CERT_FILE="" KEY_FILE=""
 # 各服务密码/密钥（v1.5.5 新增；留空则部署时自动随机生成）
 SS_PASSWORD="" ANYTLS_PASSWORD="" ANYTLS_UUID_IN="" SOCKS_USER_IN="" SOCKS_PASSWORD="" NAIVE_USER_IN="" NAIVE_PASSWORD=""
 PANEL_PASSWORD_IN="" URL_PATH_IN=""
-# v1.5.37: 节点信息基础名（--panel-title）与显式连接 IP（--server-ip）。
+# v1.6.0: 节点信息基础名（--panel-title）与显式连接 IP（--server-ip）。
 #   留空保持旧语义：panel_title="ANS-GO 管理面板"、server_ip=""（空值由面板 Go 端
 #   启动时自动探测公网 IP 并保存；shell 层不做任何公网查询）。
 PANEL_TITLE_IN="" SERVER_IP_IN=""
@@ -216,7 +224,7 @@ while [ $# -gt 0 ]; do
 done
 
 # =============================================================================
-# 工具函数（v1.5.37）：在 validate_inputs 调用前定义——校验在依赖安装前执行，
+# 工具函数（v1.6.0）：在 validate_inputs 调用前定义——校验在依赖安装前执行，
 # 此时 python3 可能尚未安装，所有工具函数都有无 python 的 shell 兜底路径。
 # 函数体约定：fnname(){ 顶格起、结束 } 顶格独立一行，供 scripts/test-*.sh 提取执行。
 # =============================================================================
@@ -295,12 +303,70 @@ except ValueError:
   return 0
 }
 
+# 下载后的 Linux 可执行文件先验证 ELF 架构与内嵌版本，校验失败不覆盖正式路径。
+ansgo_verify_elf(){
+  local file="$1" arch="$2" version="$3"
+  python3 - "$file" "$arch" "$version" <<'PY'
+import re, struct, sys
+p, arch, version = sys.argv[1:]
+with open(p, 'rb') as f:
+    h = f.read(20)
+assert len(h) == 20 and h[:5] == b'\x7fELF\x02' and h[5] == 1, '不是 ELF64 小端二进制'
+assert struct.unpack('<H', h[18:20])[0] == {'amd64': 62, 'arm64': 183}[arch], 'ELF 架构错误'
+version = version.lstrip('v').encode()
+with open(p, 'rb') as f:
+    data = f.read()
+    assert version+b'\0' in data or version in re.findall(rb'main\.version=(\d+\.\d+\.\d+)', data), '二进制内嵌版本不匹配'
+PY
+}
+
 # =============================================================================
 # 参数校验（v1.5.5 新增）
 #   仅对「带参数安装/部署」场景校验；--uninstall / --landing / --purge 跳过
 # =============================================================================
 validate_inputs(){
   local errs=0 port p
+  local final="${VALIDATE_PORTS_ONLY:-0}"
+
+  # secrets.env 保持 source 兼容；拒绝 shell 元字符，而非尝试多种解析器的引用差异。
+  local field value
+  for field in SS_PASSWORD ANYTLS_PASSWORD ANYTLS_UUID_IN SOCKS_USER_IN SOCKS_PASSWORD NAIVE_USER_IN NAIVE_PASSWORD; do
+    value="${!field:-}"
+    if [[ "$value" =~ [^a-zA-Z0-9_./+=,@%:!?~-] ]] && [ -n "$value" ]; then
+      err "$field 含不安全 shell 字符（引号、空白、美元符号、反引号等）"; errs=$((errs+1))
+    fi
+  done
+  for field in DOMAIN EMAIL PANEL_USER DISGUISE_PANEL DISGUISE_NAIVE DYNU_KEY DYNU_CID DYNU_SECRET CERT_FILE KEY_FILE PANEL_PASSWORD_IN; do
+    value="${!field:-}"
+    if [[ "$value" =~ [[:cntrl:]] ]] || [[ "$value" == *'$'* || "$value" == *'`'* || "$value" == *"'"* || "$value" == *'"'* || "$value" == *'\'* || "$value" == *' #'* ]]; then
+      err "$field 含不能安全传输到 JSON/env 的字符"; errs=$((errs+1))
+    fi
+  done
+  if [ -n "$DOMAIN" ] && ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]]; then
+    err "域名格式不合法"; errs=$((errs+1))
+  fi
+  # 首次调用只检查“已提供”的显式参数；交互收集结束后再检查证书分支完整性。
+  if [ "$final" = 1 ]; then
+    case "$CERT_MODE" in acme|manual) ;; *) err "证书模式须为 acme/manual"; errs=$((errs+1));; esac
+    if [ "$CERT_MODE" = acme ]; then
+      if { [ -n "$DYNU_CID" ] && [ -z "$DYNU_SECRET" ]; } || { [ -z "$DYNU_CID" ] && [ -n "$DYNU_SECRET" ]; }; then
+        err "Dynu OAuth 凭证必须成对"; errs=$((errs+1))
+      fi
+      if [ -z "$DYNU_KEY" ] && [ -z "$DYNU_CID" ]; then
+        err "acme 模式缺少 Dynu 凭证（API Key 或完整 OAuth）"; errs=$((errs+1))
+      fi
+    elif [ "$CERT_MODE" = manual ]; then
+      if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
+        err "manual 模式缺少证书或私钥路径"; errs=$((errs+1))
+      elif [ ! -f "$CERT_FILE" ] || [ ! -r "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ] || [ ! -r "$KEY_FILE" ]; then
+        err "manual 证书或私钥不存在/不可读"; errs=$((errs+1))
+      fi
+    fi
+  fi
+  # 初轮只校验已提供值；随机端口填充后 final=1 再次完整校验。
+  if [ "$final" = 0 ] && [ "$errs" -gt 0 ]; then
+    err "参数校验失败（$errs 项），已列出详情。修正后重试。"; exit 1
+  fi
 
   # 端口范围校验（1-65535，整数）
   for p in SS_PORT ANYTLS_PORT SOCKS_PORT NAIVE_PORT PANEL_PORT; do
@@ -382,7 +448,7 @@ validate_inputs(){
     fi
   fi
 
-  # v1.5.37: 节点信息基础名（--panel-title）
+  # v1.6.0: 节点信息基础名（--panel-title）
   #   接受任意可读字符（含 $ ` \ " ' # 空格 中文 % 等）：Docker 侧经 PANEL_TITLE_ENCODED
   #   percent-encoding transport（见 docker_gen_ansgo_env / ansgo_pct_encode），裸金属
   #   仅 JSON 转义（ansgo_json_escape），无需拒绝特殊字符。
@@ -402,7 +468,7 @@ validate_inputs(){
     fi
   fi
 
-  # v1.5.37: 显式连接 IP（--server-ip）：严格 IPv4/IPv6 校验。
+  # v1.6.0: 显式连接 IP（--server-ip）：严格 IPv4/IPv6 校验。
   #   ansgo_ip_check 优先 python3 ipaddress；python3 未装时（校验先于依赖安装）走
   #   shell 结构化兜底——拒绝 2001:::1 / ::: / 仅冒号 / 双:: 等非法文本，不崩溃。
   #   依赖段确保 python3 后安装流程会用 ipaddress 再复核一次。
@@ -424,13 +490,8 @@ validate_inputs(){
     exit 1
   fi
 }
-# 仅在「安装/部署」场景下校验；卸载/落地/帮助场景跳过
-if [ "$UNINSTALL" = 0 ] && [ "$LANDING" = 0 ]; then
-  validate_inputs
-fi
-
 # =============================================================================
-# v1.5.37: 初始化生成函数（抽出为独立函数 + 路径参数化，便于离线测试覆盖；
+# v1.6.0: 初始化生成函数（抽出为独立函数 + 路径参数化，便于离线测试覆盖；
 #   与 Go 端 confPath var 测试覆盖同一模式。工具函数 ansgo_json_escape /
 #   ansgo_pct_encode / ansgo_ip_check 已前移至参数校验段之前）
 # =============================================================================
@@ -456,11 +517,11 @@ metal_ensure_panel_json(){
   tmp="${out}.tmp.$$"
   if ! cat > "$tmp" <<EOF
 {
-  "domain": "${DOMAIN}",
+  "domain": "$(ansgo_json_escape "$DOMAIN")",
   "panel_port": ${PANEL_PORT},
   "panel_title": "${title_json}",
-  "url_path": "${URLPATH}",
-  "admin_user": "${PANEL_USER}",
+  "url_path": "$(ansgo_json_escape "$URLPATH")",
+  "admin_user": "$(ansgo_json_escape "$PANEL_USER")",
   "admin_pass_hash": "PLACEHOLDER",
   "session_hours": 8,
   "login_lock_threshold": 5,
@@ -470,24 +531,26 @@ metal_ensure_panel_json(){
   "anytls_port": ${ANYTLS_PORT},
   "socks_port": ${SOCKS_PORT},
   "naive_port": ${NAIVE_PORT},
-  "disguise_panel": "${DISGUISE_PANEL}",
-  "disguise_naive": "${DISGUISE_NAIVE}",
+  "disguise_panel": "$(ansgo_json_escape "$DISGUISE_PANEL")",
+  "disguise_naive": "$(ansgo_json_escape "$DISGUISE_NAIVE")",
   "svc_ss_enabled": "false",
   "svc_anytls_enabled": "false",
   "svc_socks_enabled": "false",
   "svc_naive_enabled": "false",
   "caddy_enable": "$([ "$NO_CADDY" = 1 ] && echo false || echo true)",
-  "cert_mode": "${CERT_MODE}",
+  "cert_mode": "$(ansgo_json_escape "$CERT_MODE")",
   "cert_dir": "/etc/ssl/ansgo",
-  "cert_fullchain": "${CERT_FILE}",
-  "cert_privkey": "${KEY_FILE}",
-  "dynu_api_key": "${DYNU_KEY}",
-  "dynu_client_id": "${DYNU_CID}",
-  "dynu_secret": "${DYNU_SECRET}",
-  "acme_email": "${EMAIL}",
+  "cert_fullchain": "$(ansgo_json_escape "$CERT_FILE")",
+  "cert_privkey": "$(ansgo_json_escape "$KEY_FILE")",
+  "dynu_api_key": "$(ansgo_json_escape "$DYNU_KEY")",
+  "dynu_client_id": "$(ansgo_json_escape "$DYNU_CID")",
+  "dynu_secret": "$(ansgo_json_escape "$DYNU_SECRET")",
+  "acme_email": "$(ansgo_json_escape "$EMAIL")",
   "db_path": "/etc/ansgo/sessions.db",
   "server_ip": "${ip_json}",
-  "landings": []
+  "landings": [],
+  "auto_upgrade": "false",
+  "backup_keep": 5
   }
 EOF
   then
@@ -511,7 +574,7 @@ EOF
 }
 
 # Docker ansgo.env 生成（$1=输出路径；宿主侧凭证+端口+预指定密钥透传给容器 entrypoint）。
-#   v1.5.37: 标题经 PANEL_TITLE_ENCODED percent-encoding 透传（ansgo_pct_encode）——
+#   v1.6.0: 标题经 PANEL_TITLE_ENCODED percent-encoding 透传（ansgo_pct_encode）——
 #   compose v2 对 env_file 做 $ 插值与 " #" 行内注释截断，明文特殊字符跨版本不安全；
 #   ENCODED 键名自明编码语义（与「标题本身含 %」无歧义）。entrypoint 解码后写
 #   panel.json 可读值。SERVER_IP_IN 经严格 IP 校验（值域 [0-9a-fA-F:.]）明文透传。
@@ -586,13 +649,14 @@ rand_port(){
   done
 }
 # 仅在「安装/部署」场景下填补；卸载/落地/帮助场景跳过
-if [ "$UNINSTALL" = 0 ] && [ "$LANDING" = 0 ]; then
+fill_ports(){
+  _rand_port_used=" $SS_PORT $ANYTLS_PORT $SOCKS_PORT $NAIVE_PORT $PANEL_PORT "
   [ -z "$SS_PORT" ]     && SS_PORT="$(rand_port)"     && _rand_port_used+="$SS_PORT "
   [ -z "$ANYTLS_PORT" ] && ANYTLS_PORT="$(rand_port)" && _rand_port_used+="$ANYTLS_PORT "
   [ -z "$SOCKS_PORT" ]  && SOCKS_PORT="$(rand_port)"  && _rand_port_used+="$SOCKS_PORT "
   [ -z "$NAIVE_PORT" ]  && NAIVE_PORT="$(rand_port)"  && _rand_port_used+="$NAIVE_PORT "
   [ -z "$PANEL_PORT" ]  && PANEL_PORT="$(rand_port)"  && _rand_port_used+="$PANEL_PORT "
-fi
+}
 
 # =============================================================================
 # 卸载（apt purge 风格两级：默认保留配置/卷，--purge 彻底删除一切）
@@ -669,6 +733,7 @@ do_uninstall(){
   # ---- 裸金属模式卸载 ----
   if [ "$HAS_METAL" = 1 ]; then
     log "[裸金属] 停止并禁用服务..."
+    systemctl disable --now ansgo-autoupgrade.timer 2>/dev/null || true
     for s in ansgo-panel caddy sing-box; do
       systemctl stop "$s" 2>/dev/null || true
       systemctl disable "$s" 2>/dev/null || true
@@ -679,7 +744,8 @@ do_uninstall(){
     log "[裸金属] 移除管理二进制 + 脚本..."
     rm -f /usr/local/bin/ansgo-panel /usr/local/bin/ansgo-admin \
           /usr/local/bin/ansgo-genconf /usr/local/bin/ansgo-cert-reload \
-          /usr/local/bin/ansgo-cert-issue.sh /usr/local/bin/dns_dynukey.sh
+          /usr/local/bin/ansgo-cert-issue.sh /usr/local/bin/ansgo-sync-manual-cert \
+          /usr/local/bin/ansgo-landing.sh /usr/local/bin/dns_dynukey.sh
     if [ "$PURGE" = 1 ]; then
       log "[裸金属] --purge：移除代理二进制 + 配置/密钥/证书/备份/调优..."
       rm -f /usr/local/bin/sing-box /usr/local/bin/caddy
@@ -687,6 +753,13 @@ do_uninstall(){
       rm -rf /root/.acme.sh /etc/ansgo-deploy
       rm -rf /etc/ansgo-backup-* /etc/ansgo-uninstall-backup-*
       rm -f /etc/sysctl.d/99-ansgo-tune.conf /etc/security/limits.d/99-ansgo.conf
+      rm -f /etc/systemd/journald.conf.d/60-ansgo.conf
+      rm -rf /etc/systemd/system/ansgo-panel.service.d \
+             /etc/systemd/system/caddy.service.d \
+             /etc/systemd/system/sing-box.service.d
+      rm -f /etc/systemd/system/ansgo-autoupgrade.service \
+            /etc/systemd/system/ansgo-autoupgrade.timer \
+            /usr/local/bin/ansgo-limits /usr/local/bin/ansgo-upgrade
       ok "[裸金属] 配置/密钥/证书/备份/调优已彻底删除"
     else
       ok "[裸金属] 配置保留在 /etc/ansgo/ /etc/ssl/ansgo/（--purge 可彻底删）"
@@ -706,12 +779,14 @@ if [ "${UNINSTALL:-0}" = 1 ]; then do_uninstall; exit 0; fi
 # 注：首次执行时 /etc/ansgo-deploy/ansgo-landing.sh 尚未下载，需先从仓库拉取
 do_landing(){
   [ "$(id -u)" = 0 ] || { err "需 root 运行"; exit 1; }
+  WORK=$(mktemp -d) || exit 1
   mkdir -p /etc/ansgo-deploy
   local LSCRIPT=/etc/ansgo-deploy/ansgo-landing.sh
   if [ ! -f "$LSCRIPT" ]; then
     log "下载 ansgo-landing.sh ..."
-    if command -v curl >/dev/null; then curl -fsSL "$RAW/ansgo-landing.sh" -o "$LSCRIPT"
-    else wget -qO "$LSCRIPT" "$RAW/ansgo-landing.sh"; fi
+    if command -v curl >/dev/null; then curl -fsSL "$RAW/ansgo-landing.sh" -o "$WORK/landing"
+    else wget -qO "$WORK/landing" "$RAW/ansgo-landing.sh"; fi
+    install -m 755 "$WORK/landing" "$LSCRIPT" || exit 3
     [ -s "$LSCRIPT" ] || { err "下载 ansgo-landing.sh 失败（$RAW/ansgo-landing.sh）"; exit 3; }
     chmod 0755 "$LSCRIPT"
   fi
@@ -765,7 +840,7 @@ do_docker_deploy(){
   # ansgo.env：凭证 + 端口 + 用户预指定密钥（600 权限，敏感不入 git）
   # 注：代理服务密钥（SS_KEY_IN 等）用 _IN 后缀避免与容器内同名变量冲突；
   #     entrypoint.sh 用 ${VAR:-随机} 接收，留空则在容器内随机生成。
-  #     v1.5.37: 抽出为 docker_gen_ansgo_env 函数 + 新增 PANEL_TITLE_IN/SERVER_IP_IN 透传。
+  #     v1.6.0: 抽出为 docker_gen_ansgo_env 函数 + 新增 PANEL_TITLE_IN/SERVER_IP_IN 透传。
   docker_gen_ansgo_env "$DIR/ansgo.env" || { err "生成 $DIR/ansgo.env 失败（磁盘满或目录不可写），已中止部署"; exit 1; }
   chmod 600 "$DIR/ansgo.env" || { err "无法设置 $DIR/ansgo.env 权限"; exit 1; }
   log "已生成 $DIR/ansgo.env（含凭证，权限 600）"
@@ -831,8 +906,10 @@ do_docker_deploy(){
   log "使用 compose 命令: $COMPOSE ($($COMPOSE version --short 2>/dev/null || echo unknown))"
 
   # 拉镜像：优先 compose pull；失败再用 docker pull 兜底（绕过 compose 自身问题）
-  #   v1.5.10 已发布公开镜像 ghcr.io/6667084/ansgo:latest（amd64+arm64）
-  IMG="ghcr.io/${REPO%/*}/ansgo:latest"
+  #   使用与脚本一致的固定版本镜像，--ver 不回退到浮动 latest
+  IMG="ghcr.io/${REPO%/*}/ansgo:${VER}"
+  sed -i "s#image: ghcr.io/6667084/ansgo:.*#image: ${IMG}#" "$DIR/docker-compose.yml"
+  $COMPOSE config --quiet || exit 1
   if ! $COMPOSE pull 2>&1 | tail -5; then
     warn "$COMPOSE pull 失败，尝试直接 docker pull $IMG 兜底"
     if ! docker pull "$IMG" 2>&1 | tail -10; then
@@ -845,7 +922,17 @@ do_docker_deploy(){
   fi
 
   $COMPOSE up -d && log "容器已启动" || { err "$COMPOSE up 失败"; exit 7; }
-  sleep 5
+  local ready=0 i
+  for i in $(seq 1 180); do
+    if docker exec ansgo grep -q '^SUCCESS' /etc/ansgo-cert.status 2>/dev/null &&
+       docker exec ansgo systemctl is-active --quiet ansgo-panel 2>/dev/null &&
+       docker exec ansgo python3 -c 'import json,ssl,urllib.request;c=json.load(open("/etc/ansgo/panel.json"));urllib.request.urlopen("https://127.0.0.1:%s%sapi/auth"%(c["panel_port"],c["url_path"]),context=ssl._create_unverified_context(),timeout=3)' 2>/dev/null; then
+      ready=1; break
+    fi
+    if docker exec ansgo grep -q '^FAILED' /etc/ansgo-cert.status 2>/dev/null; then break; fi
+    sleep 2
+  done
+  [ "$ready" = 1 ] || { err "证书签发或面板启动失败：docker logs ansgo；docker exec ansgo cat /var/log/ansgo/cert-issue.log"; exit 1; }
 
   # 读取容器内实际 url_path（卷已存在时可能与此处生成的不一致）
   local ACTUAL_PATH
@@ -873,7 +960,7 @@ do_docker_deploy(){
 ║   • 管理面板    : ${PANEL_PORT}
 ║                                                               ║
 ╠═══════════════════════════════════════════════════════════════╣
-║  ⚠️ 证书: $([ "$CERT_MODE" = "manual" ] && echo "手动模式（${CERT_FILE}），无需后台签发" || echo "Let's Encrypt 后台签发中（约 1-3 分钟），首次访问若提示不受信稍候刷新即可")
+║  ⚠️ 证书: $([ "$CERT_MODE" = "manual" ] && echo "手动模式（${CERT_FILE}），无需后台签发" || echo "Let's Encrypt 签发成功")
 ║  管理命令:
 ║     cd ${DIR} && $COMPOSE logs -f ansgo   # 查日志/签证书进度
 ║     docker exec ansgo ansgo-admin status         # 服务状态
@@ -911,92 +998,25 @@ fi
 if [ "${LANDING:-0}" = 1 ]; then do_landing; exit 0; fi
 
 # ---- 环境校验 ----
-[ "$(id -u)" = 0 ] || { err "需 root 运行"; exit 1; }
 if ! grep -qiE 'debian|ubuntu' /etc/os-release 2>/dev/null; then warn "未检测到 Debian/Ubuntu，继续但可能需手动装依赖"; fi
-command -v curl >/dev/null || apt-get update && apt-get install -y curl ca-certificates
-command -v python3 >/dev/null || apt-get install -y python3
-command -v openssl >/dev/null || apt-get install -y openssl
-
-# v1.5.37: --server-ip 严格复核（此时 python3 已确保）。顶层校验执行在依赖安装之前，
-#   python3 未装的环境走 shell 结构化兜底（不支持 IPv4-mapped 尾段等边缘格式）；
-#   此处用 ipaddress 复核一遍，非法即中止——两层取交集不会误拒合法值。
-if [ -n "$SERVER_IP_IN" ] && ! ansgo_ip_check "$SERVER_IP_IN"; then
-  err "--server-ip 复核不合法（ipaddress 严格解析）: $SERVER_IP_IN"
-  exit 1
-fi
-
-# ---- stage1: 系统调优（任意服务器都做，幂等）----
-hr "0/8 系统调优（stage1，幂等）"
-mkdir -p /etc/sysctl.d /etc/security/limits.d /etc/systemd/journald.conf.d
-# 网络内核调优（BBR/TFO/MTU/TIME_WAIT），LXC 内只读项会被自动忽略
-cat > /etc/sysctl.d/99-ansgo-tune.conf <<'SYS'
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_max_tw_buckets = 1048576
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_keepalive_time = 300
-net.ipv4.tcp_keepalive_intvl = 30
-net.ipv4.tcp_keepalive_probes = 3
-net.ipv4.ip_local_port_range = 10000 65535
-SYS
-sysctl --system >/dev/null 2>&1 || warn "部分 sysctl 在 LXC 内为宿主只读，已忽略"
-# 文件描述符上限
-cat > /etc/security/limits.d/99-ansgo.conf <<'LIM'
-* soft nofile 1048576
-* hard nofile 1048576
-root soft nofile 1048576
-root hard nofile 1048576
-LIM
-# journald 限 50M
-cat > /etc/systemd/journald.conf.d/size.conf <<'JOU'
-[Journal]
-SystemMaxUse=50M
-JOU
-systemctl restart systemd-journald 2>/dev/null || true
-log "系统调优完成"
-
 # ---- 交互式收集缺失项 ----
 if [ -z "$DOMAIN" ]; then ask_req "域名（已解析到本机）"; DOMAIN="$ASK_VAL"; fi
 [ -n "$DOMAIN" ] || { err "域名必填"; exit 2; }
 EMAIL="${EMAIL:-admin@${DOMAIN}}"
-# 证书来源：未通过参数指定时询问（acme 需要 Dynu 凭证，manual 跳过 Dynu）
-if [ "$CERT_MODE" != "manual" ] && [ "$CERT_MODE" != "acme" ]; then
-  if [ "$NONINT" = 0 ]; then
-    inf "证书来源：1) acme 自动签发（需要 Dynu DNS 凭证，推荐）  2) 手动指定已有证书路径"
-    ask "选择 [1/acme 或 2/manual]" "acme"; CERT_MODE="${ASK_VAL:-acme}"
-    case "$CERT_MODE" in 1|acme|ACME) CERT_MODE="acme";; 2|manual|MANUAL) CERT_MODE="manual";; *) CERT_MODE="acme";; esac
-  else
-    CERT_MODE="acme"
-  fi
-fi
+# 未知证书模式留给统一校验拒绝，不能静默改回 acme。
 if [ "$CERT_MODE" = "manual" ]; then
   # manual 模式：必须提供证书+私钥路径
   if [ -z "$CERT_FILE" ]; then ask_req "证书文件完整路径（fullchain）"; CERT_FILE="$ASK_VAL"; fi
   if [ -z "$KEY_FILE" ];  then ask_req "私钥文件完整路径（privkey）"; KEY_FILE="$ASK_VAL"; fi
-  [ -f "$CERT_FILE" ] || { err "证书文件不存在: $CERT_FILE"; exit 2; }
-  [ -f "$KEY_FILE" ]  || { err "私钥文件不存在: $KEY_FILE"; exit 2; }
   inf "证书来源：手动模式（跳过 Dynu / acme 签发）"
-else
+elif [ "$CERT_MODE" = "acme" ]; then
   # acme 模式：需要 Dynu 凭证。Sentinel 修复：缺 API Key 且无完整 OAuth 对时明确中止——
   #   裸金属没有自签占位证书路径，无凭证签发必败且面板 TLS 全挂，不允许静默继续。
   #   交互：API Key 必填（推荐），留空则要求完整 OAuth Client ID+Secret（兼容旧部署）。
   #   CLI：--dynu-key 或 --dynu-client-id + --dynu-secret（完整对）。
-  CERT_MODE="acme"
   if [ -z "$DYNU_KEY" ] && [ -z "$DYNU_CID" ] && [ -z "$DYNU_SECRET" ]; then
     inf "acme 自动签发需要 Dynu API Key；已有完整 OAuth Client ID + Secret 的部署请用参数传入"
     ask_req "Dynu API Key（必填）"; DYNU_KEY="$ASK_VAL"
-  fi
-  # 凭证完整性终检（交互 + NONINT + CLI 半对场景统一拦截）
-  if [ -z "$DYNU_KEY" ]; then
-    if { [ -n "$DYNU_CID" ] && [ -z "$DYNU_SECRET" ]; } || { [ -z "$DYNU_CID" ] && [ -n "$DYNU_SECRET" ]; }; then
-      err "Dynu OAuth 凭证不完整（Client ID 与 Secret 必须成对）；或改用 --dynu-key API Key"
-      exit 2
-    fi
-    [ -n "$DYNU_CID" ] || { err "acme 模式缺少 Dynu 凭证：--dynu-key（API Key，推荐）或 --dynu-client-id + --dynu-secret（完整对）；也可改用 --cert-mode manual"; exit 2; }
   fi
 fi
 if [ "$NONINT" = 0 ]; then
@@ -1021,6 +1041,18 @@ if [ "$NONINT" = 0 ]; then
     fi
   fi
 fi
+VALIDATE_PORTS_ONLY=1 validate_inputs
+fill_ports
+validate_inputs
+[ "$(id -u)" = 0 ] || { err "需 root 运行"; exit 1; }
+if [ "$DOCKER" = 0 ] && command -v caddy >/dev/null &&
+   ! caddy list-modules 2>/dev/null | grep -F 'http.handlers.forward_proxy' >/dev/null; then
+  warn "检测到非 ANS-GO Caddy（缺 forward_proxy），安装将替换它，请先备份其配置"
+  if [ "$NONINT" = 0 ]; then
+    ask "确认替换既有 Caddy？(yes/no)" no
+    [ "$ASK_VAL" = yes ] || exit 1
+  fi
+fi
 echo "----------------------------------------"
 printf "  域名        : %s\n" "$DOMAIN"
 printf "  ⚠️ 端口（随机生成，请记下）：\n"
@@ -1032,7 +1064,7 @@ printf "  Naive伪装  : %s\n" "$DISGUISE_NAIVE"
 if [ "$CERT_MODE" = "manual" ]; then
   printf "  证书来源    : 手动（%s）\n" "$CERT_FILE"
 else
-  printf "  证书来源    : acme（Dynu %s）\n" "${DYNU_KEY:+路径A(API Key)}${DYNU_KEY:-${DYNU_CID:+路径B(OAuth)}}"
+  printf "  证书来源    : acme（Dynu %s）\n" "$([ -n "$DYNU_KEY" ] && echo "API Key 已配置" || echo "OAuth 已配置")"
 fi
 printf "  面板模式    : %s\n" "$([ "$DOCKER" = 1 ] && echo Docker || echo 裸金属)"
 [ "$NO_CADDY" = 1 ] && printf "  caddy       : 跳过（--no-caddy，不监听 80/443，让现有 web 服务器接管）\n"
@@ -1043,124 +1075,107 @@ if [ "$NONINT" = 0 ]; then
   [ "${c:-Y}" = "Y" ] || [ "${c:-Y}" = "y" ] || { warn "已取消"; exit 0; }
 fi
 
+# 输入收集、校验和确认均已完成，才允许安装依赖及修改宿主。
+APT_READY=1
+if ! command -v curl >/dev/null || ! command -v python3 >/dev/null || ! command -v openssl >/dev/null ||
+   ! command -v ss >/dev/null || ! command -v crontab >/dev/null; then
+  apt-get update && apt-get install -y --no-install-recommends curl ca-certificates python3 openssl iproute2 cron || exit 1
+fi
+command -v timeout >/dev/null || { err "缺少 coreutils timeout"; exit 1; }
+# 拒绝首次安装抢占既有监听（已部署重跑的端口由持久配置负责）。
+if [ ! -f /etc/ansgo/panel.json ] && [ ! -f /etc/ansgo-docker/docker-compose.yml ]; then
+  for p in "$SS_PORT" "$ANYTLS_PORT" "$SOCKS_PORT" "$NAIVE_PORT" "$PANEL_PORT"; do
+    if _listening_ports | grep -qx "$p"; then err "端口 $p 已被监听，请换端口"; exit 1; fi
+  done
+fi
+if [ "$CERT_MODE" = manual ]; then
+  openssl x509 -in "$CERT_FILE" -noout -checkend 0 >/dev/null || { err "证书无效或已过期"; exit 1; }
+  cmod=$(openssl x509 -in "$CERT_FILE" -pubkey -noout | openssl sha256) || exit 1
+  kmod=$(openssl pkey -in "$KEY_FILE" -pubout | openssl sha256) || exit 1
+  [ "$cmod" = "$kmod" ] || { err "证书与私钥不匹配"; exit 1; }
+fi
+WORK=$(mktemp -d) || exit 1
+mkdir -p /usr/local/bin
+BIN_STAGE=$(mktemp -d /usr/local/bin/.ansgo-install.XXXXXX) || exit 1
+dl_or_exit "$RAW/ansgo-limits" "$BIN_STAGE/ansgo-limits"
+bash -n "$BIN_STAGE/ansgo-limits" || exit 1
+install -m 755 "$BIN_STAGE/ansgo-limits" /usr/local/bin/ansgo-limits || exit 1
+source /usr/local/bin/ansgo-limits
+ansgo_logs_init || exit 1
+ansgo_tune || exit 1
+
 # ---- Docker 一体化分流（KVM 主机推荐）：容器内跑全部服务，这里完成后即退出 ----
 if [ "$DOCKER" = 1 ]; then
   do_docker_deploy
 fi
 
-# ---- 下载助手已提前在文件顶部定义（line 112 附近，v1.5.10 修复）----
-
 hr "1/8 下载部署脚本（本仓库 raw）"
 mkdir -p /etc/ansgo /etc/ansgo-deploy
-for f in ansgo-admin ansgo-genconf ansgo-cert-reload ansgo-cert-issue.sh dns_dynukey.sh; do
-  log "下载 $f"; dl_or_exit "$RAW/$f" "/etc/ansgo-deploy/$f"
+for f in ansgo-admin ansgo-genconf ansgo-cert-reload ansgo-cert-issue.sh ansgo-sync-manual-cert ansgo-landing.sh dns_dynukey.sh; do
+  log "下载 $f"; dl_or_exit "$RAW/$f" "$WORK/$f"
+  bash -n "$WORK/$f" || exit 1
+  install -m 0755 "$WORK/$f" "/etc/ansgo-deploy/$f" || exit 1
+  install -m 0755 "$WORK/$f" "/usr/local/bin/$f" || exit 1
 done
 install -m 0755 /etc/ansgo-deploy/ansgo-admin       /usr/local/bin/ansgo-admin
 install -m 0755 /etc/ansgo-deploy/ansgo-genconf     /usr/local/bin/ansgo-genconf
 install -m 0755 /etc/ansgo-deploy/ansgo-cert-reload /usr/local/bin/ansgo-cert-reload
 
 hr "2/8 确保 sing-box / caddy(naive) 就位"
-# 预创建服务配置目录（与 Dockerfile.allinone / entrypoint.sh 一致）。
-# ansgo-genconf 写 /etc/sing-box/config.json 与 /etc/caddy/Caddyfile 时
-# 不会自动建父目录（早期版本），旧部署或全新机首次安装可能缺失 → 面板
-# 「服务安装」时报 FileNotFoundError。这里 mkdir 兜底，genconf 也加了
-# os.makedirs 二次保险（v1.5.4）。
 mkdir -p /etc/sing-box /etc/caddy /var/www/html
-# sing-box：优先 SagerNet 官方 release（与 Dockerfile.allinone / ansgo-admin 一致），
-#   回退本项目 release vendored 产物。官方格式：sing-box-<ver>-linux-<arch>.tar.gz
 SB_VER="1.13.13"
 if [ "$FORCE_BIN" = 1 ] || ! command -v sing-box >/dev/null; then
-  log "安装 sing-box v${SB_VER} (arch=$AARCH)"
-  SB_OK=0
-  # 源1: SagerNet 官方 release（稳定，多架构）
-  if dl "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${AARCH}.tar.gz" /tmp/sb.tgz; then
-    log "  → 从 SagerNet 官方下载成功"
-    SB_OK=1
-  # 源2: 本项目 release vendored（兜底）
-  elif dl "$REL/$VER/sing-box-linux-${AARCH}.tar.gz" /tmp/sb.tgz; then
-    log "  → 从本项目 release 下载成功"
-    SB_OK=1
+  if ! dl "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${AARCH}.tar.gz" "$WORK/sb.tgz"; then
+    dl_or_exit "$REL/$VER/sing-box-linux-${AARCH}.tar.gz" "$WORK/sb.tgz"
   fi
-  if [ "$SB_OK" = 1 ] && tar xzf /tmp/sb.tgz -C /tmp 2>/dev/null && [ -f /tmp/sing-box-*/sing-box ]; then
-    install -m 0755 /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
-  else
-    err "sing-box 下载失败（SagerNet 官方 + 本项目 release 均不可用）"
-    err "可手动下载后放到 /usr/local/bin/sing-box 再重跑，或检查网络/代理"
-    exit 3
-  fi
+  mkdir "$WORK/sb"
+  tar xzf "$WORK/sb.tgz" -C "$WORK/sb" || exit 3
+  SB_SRC=$(find "$WORK/sb" -type f -name sing-box)
+  [ -n "$SB_SRC" ] && [ -f "$SB_SRC" ] || exit 3
+  install -m 0755 "$SB_SRC" "$BIN_STAGE/sing-box" || exit 3
+  "$BIN_STAGE/sing-box" version >/dev/null || exit 3
+  mv "$BIN_STAGE/sing-box" /usr/local/bin/sing-box || exit 3
 fi
-
-# caddy-naive：klzgrad/forwardproxy 只发源码，需本项目预编译产物或现场 xcaddy 编译
-#   源1: 本项目 release 预编译产物（推荐，免编译，秒级）
-#   源2: 现场 xcaddy 编译（需 Go 1.22+ + git，约 3-5 分钟）
-#        注意：Debian 12 apt 的 golang-go 是 1.19，xcaddy@latest 的 go.mod 用了
-#        toolchain 指令（需 Go 1.21+），故必须用 Go 官方二进制，不能 apt 装。
-if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -q forwardproxy; then
-  log "安装 caddy (naive 分支, arch=$AARCH)"
-  # 源优先级：① 当前版本 release 预编译产物（秒级）
-  #          ② v1.5.16 release vendored 兜底（最后已知带 caddy-naive 资产的 release，
-  #             二进制无版本耦合；v1.5.17~v1.5.35 的 release 曾漏传该资产，导致全新
-  #             裸金属部署被迫走 xcaddy 现场编译，在 256MB/3.86GB 低配机上必败——
-  #             此兜底保证「发版忘传资产」不再阻断部署）
-  #          ③ 现场 xcaddy 编译（需 Go 1.22+ + git + ≥1.5GB 磁盘，约 3-5 分钟）
-  if dl "$REL/$VER/caddy-naive-linux-${AARCH}" /usr/local/bin/caddy 2>/dev/null && [ -s /usr/local/bin/caddy ]; then
-    chmod 0755 /usr/local/bin/caddy
-    log "  → 从本项目 release 下载成功"
-  elif dl "$REL/v1.5.16/caddy-naive-linux-${AARCH}" /usr/local/bin/caddy 2>/dev/null && [ -s /usr/local/bin/caddy ]; then
-    chmod 0755 /usr/local/bin/caddy
-    log "  → 当前版本 release 无 caddy 资产，从 v1.5.16 vendored 兜底下载成功（二进制一致）"
-  else
-    # 回退：现场用 xcaddy 编译
-    # v1.5.14: 磁盘空间预检——caddy v2.11.4 依赖树 + Go 工具链约 1.5GB，
-    # 3.86GB 这类小盘 VPS 被填满会导致后续步骤全部失败（sing-box 配置写不进去）
-    avail_mb=$(df -m / 2>/dev/null | awk 'NR==2{print $4}')
-    if [ -n "$avail_mb" ] && [ "$avail_mb" -lt 1500 ]; then
-      err "磁盘空间不足（根分区可用 ${avail_mb}MB < 1500MB），xcaddy 编译 caddy-naive 需要 ≥1.5GB"
-      err "解决方案：① 上传 caddy-naive-linux-${AARCH} 到 release $VER 后重跑"
-      err "           ② 清理磁盘后重试（apt clean / rm -rf /root/go /root/.cache）"
-      err "           ③ 用更大磁盘的服务器"
-      exit 3
-    fi
-    warn "本项目 release 无 caddy-naive 预编译产物，改用 xcaddy 现场编译（约 3-5 分钟）"
-    command -v git >/dev/null 2>&1 || { apt-get update && apt-get install -y git; }
-
-    # 确保 Go 版本 >= 1.21（xcaddy go.mod 用 toolchain 指令，旧版 Go 报 unknown directive）
-    # 优先用已装的 go；版本不足或缺失则装 Go 官方二进制（apt 的 1.19 不够新）
-    GO_BIN=""
-    if command -v go >/dev/null 2>&1; then
-      # go version 输出 "go version go1.22.5 ..."，提取 minor 版本号（22）判断 >= 21
-      GO_MINOR=$(go version 2>/dev/null | grep -oE 'go[0-9]+\.[0-9]+' | head -1 | sed 's/go[0-9]*\.//')
-      [ "${GO_MINOR:-0}" -ge 21 ] 2>/dev/null && GO_BIN="$(command -v go)"
-    fi
-    if [ -z "$GO_BIN" ]; then
-      log "当前无 Go 或版本 < 1.21，安装 Go 官方二进制 ..."
-      GO_INSTALL_VER="1.22.5"
-      case "$AARCH" in amd64) GO_ARCH=amd64;; arm64) GO_ARCH=arm64;; *) GO_ARCH=amd64;; esac
-      if dl "https://go.dev/dl/go${GO_INSTALL_VER}.linux-${GO_ARCH}.tar.gz" /tmp/go.tgz; then
-        rm -rf /usr/local/go && tar xzf /tmp/go.tgz -C /usr/local
-        GO_BIN="/usr/local/go/bin/go"
-        export PATH="/usr/local/go/bin:$PATH"
-      else
-        err "Go 官方二进制下载失败，无法编译 caddy-naive。请确保 release 有预编译产物"
-        exit 3
+if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -Fq 'http.handlers.forward_proxy'; then
+  if ! dl "$REL/$VER/caddy-naive-linux-${AARCH}" "$BIN_STAGE/caddy"; then
+    if ! dl "$REL/v1.5.16/caddy-naive-linux-${AARCH}" "$BIN_STAGE/caddy"; then
+      avail_mb=$(df -m / | awk 'NR==2{print $4}')
+      [ "$avail_mb" -ge 1500 ] || { err "xcaddy 编译需要至少 1500MB 空闲磁盘，请使用预编译资产"; exit 3; }
+      [ "$(ansgo_memory_mb)" -ge 768 ] || { err "内存不足 768MB，拒绝现场编译；请提供 caddy-naive 预编译资产"; exit 3; }
+      command -v git >/dev/null || { apt-get update && apt-get install -y --no-install-recommends git; } || exit 3
+      # 工具链、源码、所有缓存仅属于本次临时目录，不接管宿主 Go。
+      BUILD=$(mktemp -d "$WORK/caddy-naive-build.XXXXXX") || exit 3
+      GO_BIN="$(command -v go || true)"
+      if [ -n "$GO_BIN" ]; then
+        _go_v="$("$GO_BIN" version 2>/dev/null | awk 'match($0,/go[0-9]+\.[0-9]+/){s=substr($0,RSTART+2,RLENGTH-2);split(s,a,".");print a[1],a[2];exit}')"
+        read -r GO_MAJOR GO_MINOR <<< "$_go_v"
+        if [ "${GO_MAJOR:-0}" -lt 1 ] ||
+           { [ "$GO_MAJOR" -eq 1 ] && [ "$GO_MINOR" -lt 21 ]; } ||
+           { [ "$GO_MAJOR" -eq 1 ] && [ "$GO_MINOR" -eq 21 ] && [ ! -f "$(dirname "$(dirname "$GO_BIN")")/go.env" ]; }; then
+          warn "宿主 Go $("$GO_BIN" version 2>/dev/null) 未知或不兼容，改用到临时目录的 Go 工具链"
+          GO_BIN=""
+        fi
       fi
-    fi
-
-    rm -rf /tmp/caddy-naive-build && mkdir -p /tmp/caddy-naive-build
-    if ( export PATH="/usr/local/go/bin:$PATH" GOPATH="${GOPATH:-/root/go}"; \
-         cd /tmp/caddy-naive-build && \
-         "$GO_BIN" install github.com/caddyserver/xcaddy/cmd/xcaddy@latest && \
-         git clone -b naive --depth 1 https://github.com/klzgrad/forwardproxy.git /tmp/caddy-naive-build/fp && \
-         CGO_ENABLED=0 "${GOPATH:-/root/go}/bin/xcaddy" build \
-           --with github.com/caddyserver/forwardproxy=/tmp/caddy-naive-build/fp \
-           --output /usr/local/bin/caddy ); then
-      chmod 0755 /usr/local/bin/caddy
-      log "  → xcaddy 编译成功"
-    else
-      err "caddy-naive 编译失败（需 Go 1.22+ + git + 网络）。可手动编译后放到 /usr/local/bin/caddy"
-      exit 3
+      if [ -z "$GO_BIN" ]; then
+        dl_or_exit "https://go.dev/dl/go1.26.0.linux-${AARCH}.tar.gz" "$BUILD/go.tgz"
+        tar xzf "$BUILD/go.tgz" -C "$BUILD" || exit 3
+        GO_BIN="$BUILD/go/bin/go"
+      fi
+      (
+        export PATH="$(dirname "$GO_BIN"):$PATH"
+        export GOPATH="$BUILD/gopath" GOCACHE="$BUILD/gocache" GOMODCACHE="$BUILD/gomodcache" GOFLAGS=-p=1 GOMAXPROCS=1
+        cd "$BUILD" || exit 1
+        nice -n 10 "$GO_BIN" install github.com/caddyserver/xcaddy/cmd/xcaddy@latest &&
+        git clone -b naive --depth 1 https://github.com/klzgrad/forwardproxy.git "$BUILD/fp" &&
+        CGO_ENABLED=0 nice -n 10 "$GOPATH/bin/xcaddy" build \
+          --with "github.com/caddyserver/forwardproxy=$BUILD/fp" --output "$BIN_STAGE/caddy"
+      ) || { err "xcaddy 编译失败；宿主 Go 未修改"; exit 3; }
+      rm -rf "$BUILD"
     fi
   fi
+  chmod 755 "$BIN_STAGE/caddy" || exit 3
+  "$BIN_STAGE/caddy" list-modules | grep -Fq 'http.handlers.forward_proxy' || { err "Caddy 资产缺少 forward_proxy"; exit 3; }
+  mv "$BIN_STAGE/caddy" /usr/local/bin/caddy || exit 3
 fi
 
 hr "3/8 生成协议密钥 + 面板配置"
@@ -1188,7 +1203,7 @@ chmod 600 /etc/ansgo/secrets.env
 
 # panel.json（端口/设置/域名/伪装）
 # v1.5.5: URL 路径支持 --panel-url-path 指定，否则随机（函数内实现）
-# v1.5.37: 抽出为 metal_ensure_panel_json（可离线测试 + JSON 转义防御）；
+# v1.6.0: 抽出为 metal_ensure_panel_json（可离线测试 + JSON 转义防御）；
 #   新增 --panel-title（节点信息）与 --server-ip（显式连接 IP）字段，留空保持旧语义；
 #   已有文件一律保留不覆盖（端口/伪装/节点信息以现有为准）。
 if [ -f /etc/ansgo/panel.json ]; then
@@ -1216,42 +1231,44 @@ else
   hr "4/8 签发 Let's Encrypt 证书（DNS-01，A 默认 / B 降级）"
   # acme.sh 来源：优先本仓库 vendored 快照，回退官方
   ACME_TARBALL=""
-  if dl "$REL/$VER/acme.sh-master.tar.gz" /tmp/acme.tar.gz 2>/dev/null; then ACME_TARBALL=/tmp/acme.tar.gz; log "使用本仓库 vendored acme.sh"; fi
+  if dl "$REL/$VER/acme.sh-master.tar.gz" "$WORK/acme.tar.gz" 2>/dev/null; then ACME_TARBALL="$WORK/acme.tar.gz"; log "使用本仓库 vendored acme.sh"; fi
   export DOMAIN EMAIL ACME_TARBALL
   export DYNU_API_KEY="$DYNU_KEY" DYNU_CLIENT_ID="$DYNU_CID" DYNU_SECRET="$DYNU_SECRET"
   # v1.5.36: 先清掉旧 status 文件再启动签发。轮询以「文件出现」为完成信号，
   #   旧部署残留的 SUCCESS/FAILED 会让首次轮询立即误判（假成功/假失败）。
   #   ansgo-cert-issue.sh 开头也会自清（双保险，防旧版脚本被复用）。
   rm -f /etc/ansgo-cert.status
-  log "后台签发中…（日志 /root/ansgo-cert-issue.log）"
-  nohup bash /etc/ansgo-deploy/ansgo-cert-issue.sh > /root/ansgo-cert-issue.log 2>&1 </dev/null &
-  CERT_PID=$!
-  # 轮询等签发（最长 ~180s）
-  for i in $(seq 1 60); do
-    sleep 3
-    [ -f /etc/ansgo-cert.status ] && break
-  done
-  wait "$CERT_PID" 2>/dev/null || true
-  if grep -q '^SUCCESS' /etc/ansgo-cert.status 2>/dev/null; then
-    log "✅ 证书签发成功 ($(head -1 /etc/ansgo-cert.status))"
+  log "签发中…（总超时 300 秒，日志 /var/log/ansgo/cert-issue.log）"
+  ansgo_log_trim /var/log/ansgo/cert-issue.log
+  # 脚本自行用 300 秒 timeout + setsid 终止整个进程组；调用方不再套第二层 timeout，
+  # 否则外层先终止父脚本时会留下独立会话中的 acme 子进程。
+  if bash /etc/ansgo-deploy/ansgo-cert-issue.sh >/dev/null 2>&1; then
+    log "证书签发完成"
   else
-    err "证书签发失败，详见 /root/ansgo-cert-issue.log（已保留，服务暂用占位/旧证书）"
-    warn "可稍后手动重试：DOMAIN=$DOMAIN bash /etc/ansgo-deploy/ansgo-cert-issue.sh"
+    err "证书签发失败或超时，详见 /var/log/ansgo/cert-issue.log"
+    # 仅旧的有效证书允许继续，新部署无证书必须退出。
+    if ! openssl x509 -in /etc/ssl/ansgo/fullchain.pem -noout -checkend 0 >/dev/null 2>&1; then
+      err "没有有效 TLS 证书，部署中止。检查 Dynu 权限、DNS 和签发日志后重试。"
+      exit 1
+    fi
   fi
 fi
 
 hr "5/8 生成配置（代理服务默认关闭，面板内按需安装）"
 # 初始化占位配置（genconf 已自建父目录，v1.5.4）。失败不阻塞部署——
 # 代理服务本就是面板内按需安装，占位配置缺失不影响面板/caddy 起来。
-ansgo-genconf all 2>&1 | tail -3 || warn "ansgo-genconf 初始化失败（不阻塞，面板内装服务时会再调）"
+ansgo_log_trim /var/log/ansgo/genconf.log
+ansgo-genconf all >> /var/log/ansgo/genconf.log 2>&1 || { err "配置生成失败，见 /var/log/ansgo/genconf.log"; exit 1; }
 
 hr "6/8 部署 systemd unit + 启动面板与伪装站"
 # sing-box / caddy 的 unit（面板安装服务时会 enable）
 for s in sing-box caddy; do
   if [ ! -f /etc/systemd/system/$s.service ]; then
-    dl "$RAW/systemd/$s.service" /etc/systemd/system/$s.service 2>/dev/null && log "已安装 $s.service"
+    dl_or_exit "$RAW/systemd/$s.service" "$WORK/$s.service"
+    install -m 644 "$WORK/$s.service" "/etc/systemd/system/$s.service" || exit 1
   fi
 done
+ansgo_limits || exit 1
 systemctl daemon-reload
 # caddy 启动（:443 伪装站 + :80 跳转 是域名直访体验的一部分，随面板一起起来）
 # v1.5.10: --no-caddy 模式下不启动 caddy（让现有 nginx 等 web 服务器接管 80/443）。
@@ -1262,23 +1279,38 @@ else
   systemctl enable caddy >/dev/null 2>&1 || true
   systemctl restart caddy \
     && log "caddy 已启动（:443 伪装站）" \
-    || { err "caddy 启动失败（域名直访伪装站不可用；代理服务不受影响）"; err "  排查: journalctl -u caddy -n 30 / caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile"; }
+    || { err "caddy 启动失败（域名直访伪装站不可用；代理服务不受影响）"; err "  排查: journalctl -u caddy -n 30 / caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile"; exit 1; }
 fi
 # sing-box 暂不启动（无代理服务安装前不需要）
 
 hr "7/8 部署 Web 管理面板"
 log "下载 ansgo-panel 二进制 (from release)"
-dl_or_exit "$REL/$VER/ansgo-panel-linux-${AARCH}" /usr/local/bin/ansgo-panel
-chmod 0755 /usr/local/bin/ansgo-panel
-dl_or_exit "$RAW/ansgo-panel.service" /etc/systemd/system/ansgo-panel.service
+dl_or_exit "$REL/$VER/ansgo-panel-linux-${AARCH}" "$BIN_STAGE/ansgo-panel"
+chmod 0755 "$BIN_STAGE/ansgo-panel" || exit 3
+ansgo_verify_elf "$BIN_STAGE/ansgo-panel" "$AARCH" "$VER" || { err "面板二进制架构或版本校验失败"; exit 3; }
+# 新文件位于目标同文件系统，避免覆盖正在运行的二进制。
+mv "$BIN_STAGE/ansgo-panel" /usr/local/bin/ansgo-panel || exit 3
+dl_or_exit "$RAW/ansgo-panel.service" "$WORK/ansgo-panel.service"
+install -m 644 "$WORK/ansgo-panel.service" /etc/systemd/system/ansgo-panel.service || exit 1
+dl_or_exit "$RAW/upgrade.sh" "$WORK/ansgo-upgrade"
+install -m 755 "$WORK/ansgo-upgrade" /usr/local/bin/ansgo-upgrade || exit 1
+for f in ansgo-autoupgrade.service ansgo-autoupgrade.timer; do
+  dl_or_exit "$RAW/systemd/$f" "$WORK/$f"
+  install -m 644 "$WORK/$f" "/etc/systemd/system/$f" || exit 1
+done
+# timer 默认不 enable；由用户在面板明确开启。
+ansgo_limits || exit 1
 systemctl daemon-reload
 # 设置管理员密码（bcrypt 写入 panel.json，打印明文仅一次）
 # v1.5.5: 支持 --panel-password 指定，否则随机
 PANEL_PW="${PANEL_PASSWORD_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
-/usr/local/bin/ansgo-panel -setpass "$PANEL_PW" 2>/dev/null || true
+/usr/local/bin/ansgo-panel -setpass "$PANEL_PW" || { err "管理员密码设置失败"; exit 1; }
 systemctl enable ansgo-panel >/dev/null 2>&1 || true
-systemctl restart ansgo-panel && log "ansgo-panel 已启动"
+systemctl restart ansgo-panel || exit 1
 sleep 2
+systemctl is-active --quiet ansgo-panel || { err "面板未运行，检查 journalctl -u ansgo-panel"; exit 1; }
+URL_PATH=$(python3 -c 'import json;print(json.load(open("/etc/ansgo/panel.json"))["url_path"])')
+curl --noproxy "*" -kfsS --retry 3 --retry-connrefused --max-time 5 "https://127.0.0.1:$PANEL_PORT${URL_PATH}api/auth" >/dev/null || { err "面板 TLS 验证失败"; exit 1; }
 
 # ---- 输出最终信息 ----
 hr "部署完成"

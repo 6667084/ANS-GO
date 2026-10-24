@@ -1,0 +1,456 @@
+#!/usr/bin/env bash
+# 安装、升级、容器共用；source 时只定义函数，不修改系统。ANSGO_ROOT 供隔离测试使用。
+
+ansgo_log_trim(){
+  local file="$1" size
+  [ -f "$file" ] || return 0
+  size=$(wc -c < "$file")
+  if [ "$size" -gt 1048576 ]; then
+    # 原地裁剪，保持已打开的 append fd 和兼容软链接有效。
+    python3 - "$file" <<'PY'
+import sys
+with open(sys.argv[1], 'r+b') as f:
+    f.seek(-262144, 2)
+    data = f.read()
+    f.seek(0)
+    f.write(data)
+    f.truncate()
+PY
+  fi
+}
+
+ansgo_logs_init(){
+  local root="${ANSGO_ROOT:-}" old name
+  mkdir -p "$root/var/log/ansgo" || return 1
+  chmod 700 "$root/var/log/ansgo"
+  # 本次运行的所有写入方都先 trim；日志 fd 统一 append，避免覆盖并发诊断输出。
+  for old in /root/ansgo-cert-issue.log /var/log/ansgo-cert.log /var/log/ansgo-genconf.log; do
+    case "$old" in *genconf*) name=genconf.log;; *) name=cert-issue.log;; esac
+    if [ -f "$root$old" ] && [ ! -L "$root$old" ]; then
+      ansgo_log_trim "$root$old" || return 1
+      cat "$root$old" >> "$root/var/log/ansgo/$name" || return 1
+      rm -f "$root$old"
+    fi
+    mkdir -p "$(dirname "$root$old")"
+    ln -sfn "$root/var/log/ansgo/$name" "$root$old" || return 1
+    ansgo_log_trim "$root/var/log/ansgo/$name" || return 1
+  done
+}
+
+ansgo_memory_mb(){
+  python3 - "${ANSGO_ROOT:-}" "${ANSGO_MEM_MB:-}" <<'PY'
+import os, sys
+root, override = sys.argv[1:]
+if override:
+    print(max(1, int(override)))
+    sys.exit()
+with open(root + '/proc/meminfo') as f:
+    host = next(int(x.split()[1]) * 1024 for x in f if x.startswith('MemTotal:'))
+limits = [host]
+# cgroup v2（host namespace 需解析自身路径）及 v1；忽略 max/无限大哨兵。
+paths = ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes']
+try:
+    for line in open(root + '/proc/self/cgroup'):
+        _, controllers, path = line.rstrip().split(':', 2)
+        base = '/sys/fs/cgroup' + (('/memory' if 'memory' in controllers.split(',') else ''))
+        if not controllers or 'memory' in controllers.split(','):
+            parts = path.strip('/').split('/')
+            for i in range(len(parts) + 1):
+                paths.append(base + '/' + '/'.join(parts[:i]) +
+                             ('/memory.max' if not controllers else '/memory.limit_in_bytes'))
+except OSError:
+    pass
+for path in paths:
+    try:
+        n = int(open(root + path).read().strip())
+        if n > 0:
+            limits.append(n)
+    except (OSError, ValueError):
+        pass
+print(max(1, min(limits) // 1048576))
+PY
+}
+
+ansgo_limits(){
+  local root="${ANSGO_ROOT:-}" total unit max high gomem weight oom tasks file tmp
+  local rc
+  total=$(ansgo_memory_mb) || return 1
+  for unit in sing-box caddy ansgo-panel; do
+    case "$unit" in
+      sing-box) max=$((total * 35 / 100)); [ "$max" -ge 96 ] || max=96; weight=200; oom=-500; tasks=192;;
+      caddy) max=$((total * 25 / 100)); [ "$max" -ge 64 ] || max=64; weight=150; oom=-400; tasks=128;;
+      ansgo-panel)
+        max=$((total * 15 / 100))
+        [ "$max" -ge 48 ] || max=48
+        [ "$max" -le 128 ] || max=128
+        weight=50; oom=500; tasks=96;;
+    esac
+    high=$((max * 80 / 100)); gomem=$((high * 80 / 100))
+    file="$root/etc/systemd/system/$unit.service.d/10-ansgo-limits.conf"
+    mkdir -p "$(dirname "$file")" || return 1
+    if [ -e "$file" ] && ! grep -q '^# managed-by: ansgo$' "$file"; then
+      printf '保留用户资源配置: %s\n' "$file"
+      continue
+    fi
+    tmp=$(mktemp -d "$(dirname "$file")/.ansgo-limits.XXXXXX") || return 1
+    if ! cat > "$tmp/limits" <<EOF
+# managed-by: ansgo
+[Service]
+MemoryAccounting=yes
+MemoryHigh=${high}M
+MemoryMax=${max}M
+TasksMax=${tasks}
+CPUWeight=${weight}
+OOMScoreAdjust=${oom}
+Environment=GOMEMLIMIT=${gomem}MiB
+LimitNOFILE=65535
+EOF
+    then rm -rf "$tmp"; return 1; fi
+    chmod 644 "$tmp/limits"
+    mv "$tmp/limits" "$file" || { rm -rf "$tmp"; return 1; }
+    rm -rf "$tmp"
+  done
+  # LXC 的受限 cgroup 由 systemd 忽略，不在这里探写 cgroup。
+}
+
+ansgo_tune(){
+  local root="${ANSGO_ROOT:-}"
+  mkdir -p "$root/etc/sysctl.d" "$root/etc/systemd/journald.conf.d"
+  # 旧同名项目配置保留，避免升级覆盖用户对网络参数的调整。
+  if [ ! -f "$root/etc/sysctl.d/99-ansgo-tune.conf" ]; then
+    cat > "$root/etc/sysctl.d/99-ansgo-tune.conf" <<'EOF'
+# managed-by: ansgo
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 3
+EOF
+  fi
+  # 取所有既有 drop-in 的更严格值，避免项目文件放宽用户限制。
+  python3 - "$root" <<'PY'
+import glob, os, re, sys
+root = sys.argv[1]
+p = root + '/etc/systemd/journald.conf.d/60-ansgo.conf'
+values = dict(SystemMaxUse=50*1024**2, SystemMaxFileSize=10*1024**2,
+              RuntimeMaxUse=16*1024**2, MaxRetentionSec=14*86400)
+for path in [root + '/etc/systemd/journald.conf'] + sorted(
+        glob.glob(root + '/etc/systemd/journald.conf.d/*.conf')):
+    if path == p:
+        continue
+    try:
+        lines = open(path)
+    except OSError:
+        continue
+    with lines:
+        for line in lines:
+            m = re.fullmatch(r'\s*(\w+)\s*=\s*(\d+)\s*([A-Za-z]*)\s*', line)
+            if not m or m[1] not in values:
+                continue
+            units = ({'':1,'s':1,'sec':1,'min':60,'h':3600,'day':86400,'d':86400,'week':604800}
+                     if m[1] == 'MaxRetentionSec' else
+                     {'':1,'K':1024,'M':1024**2,'G':1024**3,'T':1024**4})
+            if m[3] in units and int(m[2]) > 0:
+                values[m[1]] = min(values[m[1]], int(m[2])*units[m[3]])
+with open(p, 'w') as f:
+    f.write('# managed-by: ansgo\n[Journal]\nCompress=yes\n')
+    for k, v in values.items():
+        if k == 'MaxRetentionSec':
+            text = str(v//86400)+'day' if v % 86400 == 0 else str(v)+'s'
+        else:
+            text = str(v//1024**2)+'M' if v % 1024**2 == 0 else str(v)
+        f.write(k+'='+text+'\n')
+PY
+  [ -n "$root" ] && return 0
+  sysctl -p /etc/sysctl.d/99-ansgo-tune.conf >/dev/null 2>&1 || true
+  # 不再设置所有用户的 nofile；旧项目 limits 文件由 unit drop-in 取代。
+  if [ -f /etc/security/limits.d/99-ansgo.conf ] &&
+     grep -q '1048576' /etc/security/limits.d/99-ansgo.conf; then
+    rm -f /etc/security/limits.d/99-ansgo.conf
+  fi
+  systemctl restart systemd-journald 2>/dev/null || true
+}
+
+ansgo_migrate(){
+  python3 - "$1" "$2" <<'PY'
+import base64, json, os, random, shlex, sys, tempfile
+conf, secrets = sys.argv[1:]
+d = json.load(open(conf))
+def atomic(path, data):
+    fd, tmp = tempfile.mkstemp(prefix='.ansgo-migrate-', dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(data)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+if not isinstance(d.get('landings'), list):
+    d['landings'] = []
+    if d.get('anytls2_port'):
+        d['landings'].append(dict(
+            id='1', name='默认落地',
+            enabled=str(d.get('group2_enabled', 'false')).lower() == 'true',
+            port=int(d['anytls2_port']),
+            remote_enabled=str(d.get('ss_landing_enabled', 'false')).lower() == 'true',
+            remote_type='ss', remote_host=d.get('ss_landing_host', ''),
+            remote_port=int(d.get('ss_landing_port') or 0),
+            remote_method=d.get('ss_landing_method') or '2022-blake3-aes-128-gcm',
+            remote_password=d.get('ss_landing_password', ''), remote_user=''))
+for k in list(d):
+    if k in ('group2_enabled','anytls2_port','naive2_port') or k.startswith('ss_landing_'):
+        d.pop(k)
+# 新 schema 的一次性迁移由 Go 面板完成，此处不写 landings_schema。
+for k, v in dict(auto_upgrade='false', backup_keep=5, server_ip='',
+                 panel_title='ANS-GO 管理面板', svc_socks_enabled='false',
+                 dynu_api_key='', dynu_client_id='', dynu_secret='', acme_email='',
+                 cert_host_fullchain='', cert_host_privkey='').items():
+    d.setdefault(k, v)
+if not d.get('socks_port'):
+    used = {d.get(k) for k in ('panel_port','ss_port','anytls_port','naive_port')}
+    used.update(x.get('port') for x in d['landings'])
+    d['socks_port'] = random.choice([p for p in range(10000,65536) if p not in used])
+if os.path.exists(secrets):
+    lines = open(secrets).read().splitlines()
+    data = {}
+    for line in lines:
+        if '=' in line and not line.lstrip().startswith('#'):
+            k, v = line.split('=', 1)
+            parts = shlex.split(v)
+            data[k] = parts[0] if len(parts) == 1 else v
+    for suffix in ('PASS','UUID'):
+        old, new = 'ANYTLS2_'+suffix, 'LANDING_1_'+suffix
+        if old in data:
+            data.setdefault(new, data.pop(old))
+    data.setdefault('SOCKS_USER', os.urandom(6).hex())
+    data.setdefault('SOCKS_PASS', os.urandom(12).hex())
+    method = data.get('SS_METHOD', d.get('ss_method','2022-blake3-aes-128-gcm'))
+    want = 16 if method.startswith('2022-blake3-aes-128') else 32 if method.startswith('2022-blake3-aes-256') else 0
+    if want and str(d.get('svc_ss_enabled','true')).lower() == 'true':
+        try:
+            key = data.get('SS_KEY','').replace('-','+').replace('_','/')
+            raw = base64.b64decode(key+'='*((-len(key))%4), validate=True)
+            if len(raw) != want: raise ValueError()
+        except ValueError:
+            raw = os.urandom(want)
+            print('旧 SS2022 密钥非法，已重置，请重新复制 SS 节点')
+        data['SS_KEY'] = base64.b64encode(raw).decode()
+    # 与现有 Go/Python 简单解析器兼容：普通安全值不加引号；危险 shell 字符拒绝。
+    for k, v in data.items():
+        if not k.replace('_','').isalnum() or any(c in v for c in "'\n\r$`\\\";|&()<>\t "):
+            raise ValueError('secrets.env 含不安全值，请先通过面板重设该字段: '+k)
+    atomic(secrets, ''.join(k+'='+v+'\n' for k,v in data.items()))
+atomic(conf, json.dumps(d, ensure_ascii=False, indent=2)+'\n')
+PY
+}
+
+# 备份使用相对根路径及 manifest；SQLite 通过 backup API 获取一致快照。
+ansgo_backup(){
+  local category="$1"; shift
+  python3 - "${ANSGO_ROOT:-}" "$category" "$@" <<'PY'
+import datetime, json, os, shutil, sqlite3, stat, sys, tarfile, tempfile, urllib.parse
+root, category, *paths = sys.argv[1:]
+base = root + '/etc/ansgo-backup'
+os.makedirs(base, mode=0o700, exist_ok=True)
+os.chmod(base, 0o700)
+stem = category+'-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+out = base+'/'+stem+'.tar.gz'
+i = 0
+while os.path.exists(out):
+    i += 1
+    out = base+'/'+stem+'-'+str(i)+'.tar.gz'
+
+def is_sqlite(path):
+    try:
+        with open(path, 'rb') as f:
+            return f.read(16) == b'SQLite format 3\x00'
+    except OSError:
+        return False
+
+def sqlite_sidecar(path):
+    for suffix in ('-wal', '-shm', '-journal'):
+        if path.endswith(suffix) and is_sqlite(path[:-len(suffix)]):
+            return True
+    return False
+
+def copy_sqlite(src, dest):
+    quoted = urllib.parse.quote(src, safe='/')
+    with sqlite3.connect('file:'+quoted+'?mode=ro', uri=True) as db:
+        with sqlite3.connect(dest) as backup:
+            db.backup(backup)
+    shutil.copymode(src, dest)
+
+def copy_no_links(src, dest, ancestors=()):
+    """复制为可安全恢复的普通文件树；链接解引用且阻止目录循环。"""
+    st = os.lstat(src)
+    if stat.S_ISLNK(st.st_mode):
+        target = os.path.realpath(src)
+        if not os.path.exists(target) or target in ancestors:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, 'w') as f:
+                f.write('失效链接或循环链接: '+target+'\n')
+            os.chmod(dest, 0o600)
+            return False
+        return copy_no_links(target, dest, ancestors + (target,))
+    if stat.S_ISDIR(st.st_mode):
+        real = os.path.realpath(src)
+        os.makedirs(dest, mode=0o700, exist_ok=True)
+        entries = list(os.scandir(src))
+        for entry in entries:
+            child = os.path.join(dest, entry.name)
+            if sqlite_sidecar(entry.path):
+                continue
+            copy_no_links(entry.path, child, ancestors + (real,))
+        shutil.copystat(src, dest, follow_symlinks=False)
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        # 恢复端只接受普通文件；FIFO/设备文件不能触碰，跳过并由 manifest 标记。
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, 'w') as f:
+            f.write('跳过特殊文件: '+src+'\n')
+        os.chmod(dest, 0o600)
+        return False
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if is_sqlite(src):
+        copy_sqlite(src, dest)
+        return True
+    shutil.copy2(src, dest, follow_symlinks=False)
+    return False
+
+with tempfile.TemporaryDirectory(prefix='.ansgo-backup-', dir=base) as tmp:
+    entries = []
+    for path in paths:
+        src = root+path
+        entries.append(dict(path=path.lstrip('/'), exists=os.path.lexists(src), kind=('dir' if os.path.isdir(src) else 'file')))
+        if not os.path.lexists(src): continue
+        dest = tmp+'/files'+path
+        copy_no_links(src, dest)
+    with open(tmp+'/manifest.json','w') as f: json.dump(entries, f)
+    archive = tmp+'/backup.tar.gz'
+    with tarfile.open(archive, 'w:gz') as tar:
+        tar.add(tmp+'/manifest.json', arcname='manifest.json')
+        if os.path.exists(tmp+'/files'): tar.add(tmp+'/files', arcname='files')
+    os.chmod(archive, 0o600)
+    os.replace(archive, out)
+print(out)
+PY
+}
+
+ansgo_restore(){
+  python3 - "${ANSGO_ROOT:-}" "$1" <<'PY'
+import json, os, shutil, sys, tarfile, tempfile
+root, archive = sys.argv[1:]
+
+def remove_path(path):
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        os.unlink(path)
+
+def old_sibling(path):
+    holder = tempfile.mkdtemp(prefix='.ansgo-restore-old-', dir=os.path.dirname(path))
+    os.rmdir(holder)
+    os.replace(path, holder)
+    return holder
+
+with tempfile.TemporaryDirectory(prefix='ansgo-restore-') as tmp:
+    with tarfile.open(archive) as tar:
+        for member in tar.getmembers():
+            if member.name.startswith('/') or '..' in member.name.split('/'):
+                raise ValueError('备份包含非法路径')
+            if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                raise ValueError('备份包含链接或特殊文件，拒绝不安全恢复')
+        tar.extractall(tmp)
+    manifest = json.load(open(tmp+'/manifest.json'))
+    paths = [e.get('path', '') for e in manifest]
+    for path in paths:
+        if not path or path.startswith('/') or any(p in ('', '.', '..') for p in path.split('/')):
+            raise ValueError('非法 manifest')
+    for left in paths:
+        for right in paths:
+            if left != right and right.startswith(left+'/'):
+                raise ValueError('备份 manifest 含重叠路径，拒绝非原子恢复')
+
+    # 先把所有新内容复制到各自目标同文件系统的隐藏暂存区；复制失败时不动正式文件。
+    plans = []
+    try:
+        for entry in manifest:
+            path = entry['path']
+            dest, src = root+'/'+path, tmp+'/files/'+path
+            parent = os.path.dirname(dest)
+            os.makedirs(parent, exist_ok=True)
+            if entry['exists']:
+                if not os.path.lexists(src):
+                    raise ValueError('备份缺少 manifest 声明的路径: '+path)
+                new_root = tempfile.mkdtemp(prefix='.ansgo-restore-new-', dir=parent)
+                staged = os.path.join(new_root, 'new')
+                plans.append(dict(dest=dest, staged=staged, stage_root=new_root,
+                                  old=None, installed=False, sidecars=[]))
+                if entry.get('kind') == 'dir':
+                    shutil.copytree(src, staged)
+                else:
+                    shutil.copy2(src, staged)
+            else:
+                plans.append(dict(dest=dest, staged=None, stage_root=None,
+                                  old=None, installed=False, sidecars=[]))
+    except Exception:
+        for plan in plans:
+            if plan['stage_root']: shutil.rmtree(plan['stage_root'], ignore_errors=True)
+        raise
+
+    applied = []
+    try:
+        for plan in plans:
+            dest = plan['dest']
+            if os.path.lexists(dest):
+                plan['old'] = old_sibling(dest)
+            applied.append(plan)
+            if plan['staged']:
+                os.replace(plan['staged'], dest)
+                plan['installed'] = True
+                if dest.endswith(('.db', '.sqlite', '.sqlite3')):
+                    for suffix in ('-wal', '-shm', '-journal'):
+                        side = dest+suffix
+                        if os.path.lexists(side):
+                            plan['sidecars'].append((side, old_sibling(side)))
+    except Exception:
+        rollback_errors = []
+        for plan in reversed(applied):
+            dest = plan['dest']
+            try:
+                if plan['installed']:
+                    remove_path(dest)
+                if plan['old']:
+                    os.replace(plan['old'], dest)
+                for side, old in reversed(plan['sidecars']):
+                    remove_path(side)
+                    os.replace(old, side)
+            except Exception as exc:
+                rollback_errors.append(str(exc))
+        for plan in plans:
+            if plan['stage_root']: shutil.rmtree(plan['stage_root'], ignore_errors=True)
+        if rollback_errors:
+            raise RuntimeError('恢复失败且回滚不完整: '+'; '.join(rollback_errors))
+        raise
+    # 已提交后的清理错误不能触发回滚；部分旧副本删除后已无法再完整回滚。
+    for plan in plans:
+        for path in [plan['old']] + [old for _, old in plan['sidecars']]:
+            if path:
+                try: remove_path(path)
+                except OSError as exc: print('旧副本待清理: '+path+': '+str(exc), file=sys.stderr)
+        if plan['stage_root']: shutil.rmtree(plan['stage_root'], ignore_errors=True)
+PY
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "${1:-apply}" in
+    apply) ansgo_limits;;
+    tune) ansgo_tune;;
+    *) printf '用法: ansgo-limits [apply|tune]\n' >&2; exit 1;;
+  esac
+fi

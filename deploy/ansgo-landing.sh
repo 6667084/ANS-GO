@@ -9,7 +9,11 @@
 #   bash install.sh --landing                # 交互式
 #   bash install.sh --landing --port 8388 --non-interactive
 # =============================================================================
-set -uo pipefail
+set -Eeuo pipefail
+umask 077
+WORK=$(mktemp -d)
+STAGE=""
+trap 'rm -rf "$WORK" "${STAGE:-}"; command -v apt-get >/dev/null && apt-get clean || true' EXIT
 if [ -t 1 ]; then C_G='\033[32m';C_Y='\033[33m';C_R='\033[31m';C_0='\033[0m'; else C_G='';C_Y='';C_R='';C_0=''; fi
 log(){ printf "${C_G}[*]${C_0} %s\n" "$*"; }
 warn(){ printf "${C_Y}[!]${C_0} %s\n" "$*" >&2; }
@@ -30,16 +34,22 @@ done
 
 log "=== 落地服务器 Shadowsocks 部署 ==="
 
+[[ "$LANDING_PORT" =~ ^[0-9]+$ ]] && [ "$LANDING_PORT" -ge 1 ] && [ "$LANDING_PORT" -le 65535 ] || { err "端口须为 1-65535"; exit 1; }
+
 # 装依赖
-command -v curl >/dev/null || { apt-get update && apt-get install -y curl; }
+command -v curl >/dev/null || { apt-get update && apt-get install -y --no-install-recommends curl ca-certificates openssl python3; }
 
 # 装 sing-box（若未装）
 if ! command -v sing-box >/dev/null; then
-  REPO="jiasongji/ANS-GO"; VER="v1.1.0"
+  REPO="6667084/ANS-GO"; VER="v1.6.0"
   AARCH=$(uname -m); AARCH="${AARCH/x86_64/amd64}"; AARCH="${AARCH/aarch64/arm64}"
   log "下载 sing-box (from release, arch=$AARCH)"
-  curl -fsSL "https://github.com/${REPO}/releases/download/${VER}/sing-box-linux-${AARCH}.tar.gz" -o /tmp/sb.tgz || { err "下载失败"; exit 1; }
-  tar xzf /tmp/sb.tgz -C /tmp && install -m 0755 /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
+  curl -fsSL "https://github.com/${REPO}/releases/download/${VER}/sing-box-linux-${AARCH}.tar.gz" -o "$WORK/sb.tgz" || { err "下载失败"; exit 1; }
+  tar xzf "$WORK/sb.tgz" -C "$WORK"
+  STAGE=$(mktemp -d /usr/local/bin/.ansgo-landing.XXXXXX)
+  install -m 755 "$WORK"/sing-box-*/sing-box "$STAGE/sing-box"
+  "$STAGE/sing-box" version >/dev/null
+  mv "$STAGE/sing-box" /usr/local/bin/sing-box
 fi
 
 # 生成密钥
@@ -73,17 +83,23 @@ User=root
 ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
 RestartSec=3
-LimitNOFILE=1048576
+LimitNOFILE=65535
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 [Install]
 WantedBy=multi-user.target
 EOF
 
+if [ ! -f /usr/local/bin/ansgo-limits ]; then
+  curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/v1.6.0/deploy/ansgo-limits -o "$WORK/ansgo-limits"
+  install -m 755 "$WORK/ansgo-limits" /usr/local/bin/ansgo-limits
+fi
+/usr/local/bin/ansgo-limits
 systemctl daemon-reload
 systemctl enable sing-box >/dev/null 2>&1
 systemctl restart sing-box
 sleep 2
+systemctl is-active --quiet sing-box
 
 PUBIP=$(curl -s4 --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 

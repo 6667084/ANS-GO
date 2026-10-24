@@ -44,6 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version || github.ref }}
 
       - name: 设置 QEMU（arm64 模拟）
         uses: docker/setup-qemu-action@v3
@@ -62,10 +64,12 @@ jobs:
 
       - name: 计算版本号
         id: ver
+        env:
+          TARGET_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          V="${{ inputs.version }}"
-          [ -z "$V" ] && V="${GITHUB_REF_NAME}"
-          case "$V" in v*) NV="${V#v}" ;; *) NV="$V" ;; esac
+          V="$TARGET_VERSION"
+          [[ "$V" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "版本须为 vX.Y.Z"; exit 1; }
+          NV="${V#v}"
           echo "tag=$V"     >> "$GITHUB_OUTPUT"
           echo "version=$NV" >> "$GITHUB_OUTPUT"
 
@@ -102,13 +106,17 @@ jobs:
         arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version || github.ref }}
 
       - name: 计算版本号
         id: ver
+        env:
+          TARGET_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          V="${{ inputs.version }}"
-          [ -z "$V" ] && V="${GITHUB_REF_NAME}"
-          case "$V" in v*) NV="${V#v}" ;; *) NV="$V" ;; esac
+          V="$TARGET_VERSION"
+          [[ "$V" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "版本须为 vX.Y.Z"; exit 1; }
+          NV="${V#v}"
           echo "tag=$V"      >> "$GITHUB_OUTPUT"
           echo "version=$NV" >> "$GITHUB_OUTPUT"
 
@@ -153,10 +161,12 @@ jobs:
     steps:
       - name: 计算版本号
         id: ver
+        env:
+          TARGET_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          V="${{ inputs.version }}"
-          [ -z "$V" ] && V="${GITHUB_REF_NAME}"
-          case "$V" in v*) NV="${V#v}" ;; *) NV="$V" ;; esac
+          V="$TARGET_VERSION"
+          [[ "$V" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "版本须为 vX.Y.Z"; exit 1; }
+          NV="${V#v}"
           echo "tag=$V" >> "$GITHUB_OUTPUT"
 
       - name: 下载全部架构资产
@@ -174,6 +184,7 @@ jobs:
                    sing-box-linux-amd64.tar.gz sing-box-linux-arm64.tar.gz; do
             test -s "$f" || { echo "MISSING: $f"; exit 1; }
           done
+          sha256sum ansgo-panel-linux-* caddy-naive-linux-* sing-box-linux-*.tar.gz > SHA256SUMS
           ls -la
 
       - name: 创建（或复用）release 并上传资产
@@ -188,7 +199,7 @@ jobs:
           gh release upload "$TAG" -R "${{ github.repository }}" \
             assets/ansgo-panel-linux-amd64 assets/ansgo-panel-linux-arm64 \
             assets/caddy-naive-linux-amd64 assets/caddy-naive-linux-arm64 \
-            assets/sing-box-linux-amd64.tar.gz assets/sing-box-linux-arm64.tar.gz \
+            assets/sing-box-linux-amd64.tar.gz assets/sing-box-linux-arm64.tar.gz assets/SHA256SUMS \
             --clobber
           echo "=== release assets after upload ==="
           gh release view "$TAG" -R "${{ github.repository }}" --json assets --jq '[.assets[].name]'

@@ -7,14 +7,15 @@
 #   2. 生成 secrets.env（SS / ANYTLS / SOCKS / NAIVE 密钥）
 #   3. 设置管理员密码（PANEL_PASS 环境变量 → bcrypt）
 # 每次启动：
-#   4. 确保证书存在（无则自签占位，保证服务能起）
+#   4. 确保证书存在（acme 首次无有效证书则签发，manual 则校验同步副本）
 #   5. ansgo-genconf 生成 sing-box / caddy 配置
-#   6. 后台签发真实证书（若有 Dynu 凭证且当前非 Let's Encrypt）
+#   6. 首次 acme 必须取得有效 Let's Encrypt 证书，否则容器初始化失败
 #   7. exec /sbin/init（systemd 拉起 caddy(:443) + ansgo-panel）
 #
 # 所有配置/密钥/证书持久化在挂载卷，容器重建不丢失。
 # =============================================================================
-set -uo pipefail
+set -Eeuo pipefail
+umask 077
 
 CONF=/etc/ansgo/panel.json
 SECRETS=/etc/ansgo/secrets.env
@@ -22,11 +23,25 @@ CERTDIR=/etc/ssl/ansgo
 DOMAIN="${DOMAIN:-example.com}"
 EMAIL="${EMAIL:-admin@${DOMAIN}}"
 # 证书来源：acme（默认，需 Dynu 凭证）/ manual（手动指定已有证书+私钥路径）
+# env 只在首次初始化使用；已有 panel.json 时下方统一以持久配置覆盖。
 CERT_MODE="${CERT_MODE:-acme}"
 CERT_FULLCHAIN="${CERT_FULLCHAIN:-}"
 CERT_PRIVKEY="${CERT_PRIVKEY:-}"
+DYNU_API_KEY="${DYNU_API_KEY:-}"
+DYNU_CLIENT_ID="${DYNU_CLIENT_ID:-}"
+DYNU_SECRET="${DYNU_SECRET:-}"
 
-log(){ echo "[entrypoint] $*"; }
+source /usr/local/bin/ansgo-limits || exit 1
+ansgo_logs_init || exit 1
+ansgo_limits || exit 1
+log(){ ansgo_log_trim /var/log/ansgo/entrypoint.log; echo "[entrypoint] $*" | tee -a /var/log/ansgo/entrypoint.log; }
+# 直接传 env 的用户也必须经过同样的 shell 安全边界。
+for field in SS_KEY_IN ANYTLS_PASS_IN ANYTLS_UUID_IN SOCKS_USER_IN SOCKS_PASS_IN NAIVE_USER_IN NAIVE_PASS_IN; do
+  value="${!field:-}"
+  if [ -n "$value" ] && [[ "$value" =~ [^a-zA-Z0-9_./+=,@%:!?~-] ]]; then
+    log "FATAL: $field 含不安全 shell 字符"; exit 1
+  fi
+done
 
 mkdir -p /etc/ansgo "$CERTDIR" /etc/sing-box /etc/caddy /var/www/html /var/log
 # v1.5.32: 标记容器环境，面板 isDockerMode() 据此识别 Docker 形态（显示 manual 证书宿主路径 UI）。
@@ -72,7 +87,7 @@ ansgo_pct_decode(){
 entrypoint_ensure_panel_json(){
   local out="$1"
   [ -f "$out" ] && return 1
-  local title_raw URLPATH title_json ip_json tmp
+  local title_raw='' URLPATH title_json ip_json tmp
   local pport ssport atport skport nvport
   if [ -n "${PANEL_TITLE_ENCODED:-}" ]; then
     title_raw="$(ansgo_pct_decode "${PANEL_TITLE_ENCODED}")"
@@ -91,11 +106,11 @@ entrypoint_ensure_panel_json(){
   tmp="${out}.tmp.$$"
   if ! cat > "$tmp" <<EOF
 {
-  "domain": "${DOMAIN}",
+  "domain": "$(ansgo_json_escape "${DOMAIN}")",
   "panel_port": ${pport},
   "panel_title": "${title_json}",
-  "url_path": "${URLPATH}",
-  "admin_user": "${PANEL_USER:-admin}",
+  "url_path": "$(ansgo_json_escape "${URLPATH}")",
+  "admin_user": "$(ansgo_json_escape "${PANEL_USER:-admin}")",
   "admin_pass_hash": "PLACEHOLDER",
   "session_hours": 8,
   "login_lock_threshold": 5,
@@ -105,24 +120,26 @@ entrypoint_ensure_panel_json(){
   "anytls_port": ${atport},
   "socks_port": ${skport},
   "naive_port": ${nvport},
-  "disguise_panel": "${DISGUISE_PANEL:-proxy:https://example.com}",
-  "disguise_naive": "${DISGUISE_NAIVE:-proxy:https://example.com}",
+  "disguise_panel": "$(ansgo_json_escape "${DISGUISE_PANEL:-proxy:https://example.com}")",
+  "disguise_naive": "$(ansgo_json_escape "${DISGUISE_NAIVE:-proxy:https://example.com}")",
   "svc_ss_enabled": "false",
   "svc_anytls_enabled": "false",
   "svc_socks_enabled": "false",
   "svc_naive_enabled": "false",
   "caddy_enable": "$([ "${NO_CADDY:-0}" = 1 ] && echo false || echo true)",
-  "cert_mode": "${CERT_MODE}",
+  "cert_mode": "$(ansgo_json_escape "${CERT_MODE}")",
   "cert_dir": "/etc/ssl/ansgo",
-  "cert_fullchain": "${CERT_FULLCHAIN}",
-  "cert_privkey": "${CERT_PRIVKEY}",
-  "dynu_api_key": "${DYNU_API_KEY:-}",
-  "dynu_client_id": "${DYNU_CLIENT_ID:-}",
-  "dynu_secret": "${DYNU_SECRET:-}",
-  "acme_email": "${EMAIL:-}",
+  "cert_fullchain": "$(ansgo_json_escape "${CERT_FULLCHAIN}")",
+  "cert_privkey": "$(ansgo_json_escape "${CERT_PRIVKEY}")",
+  "dynu_api_key": "$(ansgo_json_escape "${DYNU_API_KEY:-}")",
+  "dynu_client_id": "$(ansgo_json_escape "${DYNU_CLIENT_ID:-}")",
+  "dynu_secret": "$(ansgo_json_escape "${DYNU_SECRET:-}")",
+  "acme_email": "$(ansgo_json_escape "${EMAIL:-}")",
   "db_path": "/etc/ansgo/sessions.db",
   "server_ip": "${ip_json}",
-  "landings": []
+  "landings": [],
+  "auto_upgrade": "false",
+  "backup_keep": 5
   }
 EOF
   then
@@ -172,6 +189,21 @@ EOF
   fi
 fi
 
+# 先保留旧 group2 数据，再补默认字段；新 schema 的落盘交给 Go 面板。
+ansgo_migrate "$CONF" "$SECRETS" || { log "FATAL: 配置迁移失败"; exit 1; }
+# 持久配置优先：旧 env 不能把面板里切换后的 manual/acme 模式或凭证覆盖回去。
+eval "$(python3 - "$CONF" <<'PYCERT'
+import json,shlex,sys
+c=json.load(open(sys.argv[1]))
+values=(('DOMAIN','domain','your-domain.com'),('CERT_MODE','cert_mode','acme'),
+        ('CERT_FULLCHAIN','cert_fullchain',''),('CERT_PRIVKEY','cert_privkey',''),
+        ('DYNU_API_KEY','dynu_api_key',''),('DYNU_CLIENT_ID','dynu_client_id',''),
+        ('DYNU_SECRET','dynu_secret',''),('EMAIL','acme_email',''))
+for env,key,default in values:
+    print(env+'='+shlex.quote(str(c.get(key) or default)))
+PYCERT
+)" || exit 1
+
 # ---- 2/3 设置管理员密码（仅当仍是 PLACEHOLDER 且提供了 PANEL_PASS）----
 if grep -q '"admin_pass_hash": "PLACEHOLDER"' "$CONF" 2>/dev/null && [ -n "${PANEL_PASS:-}" ]; then
   log "设置管理员密码（来自 PANEL_PASS 环境变量，已写入 bcrypt）"
@@ -205,14 +237,24 @@ import json, sys
 p, full, key = sys.argv[1], sys.argv[2], sys.argv[3]
 c = json.load(open(p))
 chg = False
-if full and not c.get('cert_host_fullchain'):
+if full and not full.startswith('/etc/ssl/ansgo/') and not c.get('cert_host_fullchain'):
     c['cert_host_fullchain'] = full; chg = True
-if key and not c.get('cert_host_privkey'):
+if key and not key.startswith('/etc/ssl/ansgo/') and not c.get('cert_host_privkey'):
     c['cert_host_privkey'] = key; chg = True
 if chg:
-    json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
+    import os,tempfile
+    fd,tmp=tempfile.mkstemp(dir=os.path.dirname(p),prefix='.ansgo-cert-')
+    with os.fdopen(fd,'w') as f: json.dump(c,f,indent=2,ensure_ascii=False)
+    os.chmod(tmp,0o600); os.replace(tmp,p)
     print('[entrypoint] 已从 env 迁移 manual 证书宿主源路径到 cert_host_*')
 PY
+}
+
+cert_is_valid(){
+  [ -s "$1" ] && [ -s "$2" ] &&
+    openssl x509 -in "$1" -noout -checkend 0 >/dev/null 2>&1 &&
+    [ "$(openssl x509 -in "$1" -pubkey -noout | openssl sha256)" = \
+      "$(openssl pkey -in "$2" -pubout | openssl sha256)" ]
 }
 
 if [ "$CERT_MODE" = "manual" ]; then
@@ -220,23 +262,20 @@ if [ "$CERT_MODE" = "manual" ]; then
   # 优先用固定同步目录；若为空但旧 env 源可读，回退用旧源做一次性同步
   if [ -s "$HOST_SYNC_FULL" ] && [ -s "$HOST_SYNC_KEY" ]; then
     log "检测到 /host/manual-certs 证书，调用 ansgo-sync-manual-cert 同步"
-    if command -v /usr/local/bin/ansgo-sync-manual-cert >/dev/null 2>&1; then
-      /usr/local/bin/ansgo-sync-manual-cert || log "WARN: ansgo-sync-manual-cert 退出码 $?"
-    else
-      cp -f "$HOST_SYNC_FULL" "$CERTDIR/fullchain.pem"
-      cp -f "$HOST_SYNC_KEY" "$CERTDIR/privkey.pem"
-      chmod 644 "$CERTDIR/fullchain.pem"; chmod 600 "$CERTDIR/privkey.pem"
-    fi
+    sync_rc=0
+    /usr/local/bin/ansgo-sync-manual-cert || sync_rc=$?
+    case "$sync_rc" in 0|10) ;; *) log "FATAL: manual 证书同步失败"; exit 1;; esac
   elif [ -f "$CERT_FULLCHAIN" ] && [ -f "$CERT_PRIVKEY" ]; then
-    # 兼容旧部署：env 源仍可读（旧 compose 已 bind mount）
-    log "WARN: /host/manual-certs 为空，回退使用 env 证书源（旧部署兼容）。建议在面板「证书管理」复制同步脚本到宿主执行。"
-    cp -f "$CERT_FULLCHAIN" "$CERTDIR/fullchain.pem"
-    cp -f "$CERT_PRIVKEY" "$CERTDIR/privkey.pem"
-    chmod 644 "$CERTDIR/fullchain.pem"; chmod 600 "$CERTDIR/privkey.pem"
-    log "已从 env 源同步到 $CERTDIR/（fullchain.pem + privkey.pem）"
+    log "使用持久配置中的已有证书副本"
   else
-    log "ERROR: 未发现 manual 证书。请在面板「证书管理」复制「系统自动任务一键安装」或「宝塔计划任务脚本」到宿主执行后再重建容器。"
+    log "FATAL: 未发现 manual 证书，请先在宿主写入固定同步目录"
+    exit 1
   fi
+  openssl x509 -in "$CERTDIR/fullchain.pem" -noout -checkend 0 >/dev/null || exit 1
+  cmod=$(openssl x509 -in "$CERTDIR/fullchain.pem" -pubkey -noout | openssl sha256) || exit 1
+  kmod=$(openssl pkey -in "$CERTDIR/privkey.pem" -pubout | openssl sha256) || exit 1
+  [ "$cmod" = "$kmod" ] || { log "FATAL: 证书与私钥不匹配"; exit 1; }
+  printf 'SUCCESS manual-mode\n' > /etc/ansgo-cert.status
   # 无论哪种来源，运行路径始终指向卷内副本
   if [ -f "$CONF" ] && command -v python3 >/dev/null 2>&1; then
     python3 - "$CONF" "$CERTDIR" <<'PY' 2>/dev/null || true
@@ -246,14 +285,17 @@ c = json.load(open(p))
 c['cert_mode'] = 'manual'
 c['cert_fullchain'] = certdir + '/fullchain.pem'
 c['cert_privkey'] = certdir + '/privkey.pem'
-json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
+import os,tempfile
+fd,tmp=tempfile.mkstemp(dir=os.path.dirname(p),prefix='.ansgo-cert-')
+with os.fdopen(fd,'w') as f: json.dump(c,f,indent=2,ensure_ascii=False)
+os.chmod(tmp,0o600); os.replace(tmp,p)
 print('[entrypoint] panel.json 已设为 manual 模式（运行路径指向卷内 ' + certdir + '/）')
 PY
   fi
   migrate_legacy_manual_meta
 else
-  if [ ! -s "$CERTDIR/fullchain.pem" ] || [ ! -s "$CERTDIR/privkey.pem" ]; then
-    log "生成自签占位证书（真实证书将由 acme.sh 后台签发覆盖）"
+  if ! cert_is_valid "$CERTDIR/fullchain.pem" "$CERTDIR/privkey.pem"; then
+    log "生成自签占位证书"
     openssl ecparam -genkey -name prime256v1 -out "$CERTDIR/privkey.pem" 2>/dev/null \
       || openssl genrsa -out "$CERTDIR/privkey.pem" 2048
     openssl req -new -x509 -days 365 -key "$CERTDIR/privkey.pem" \
@@ -261,88 +303,13 @@ else
   fi
 fi
 
-# v1.5.19: 幂等补全 panel.json 新增字段（容器重建后旧 panel.json 可能缺字段）
-#   - server_ip（v1.5.18 新增，VPC 公网 IP，缺则空串走探测，Go 端兼容）
-#   - landings（v1.5.26 新增；entrypoint 首次生成的 panel.json 在 v1.5.36 前漏了该字段，
-#     旧容器卷升级时在此幂等补空数组，与裸金属 install.sh 对齐）
-#   与裸金属 upgrade.sh 的补字段逻辑保持一致，避免 Docker 形态字段滞后。
-if [ -f "$CONF" ] && command -v python3 >/dev/null 2>&1; then
-  python3 -c "
-import json
-p = '$CONF'
-c = json.load(open(p))
-changed = False
-# v1.5.18: server_ip（用户手动填写的公网 IP，默认空）
-if 'server_ip' not in c:
-    c['server_ip'] = ''
-    changed = True
-# v1.5.36: landings（多落地服务数组，Go 端 nil-safe 但空列表引导更友好）。
-# 用 isinstance 判断而非 'not in'：Go 面板 saveConfig 会把 nil 切片序列化成
-# "landings": null —— 键存在但值非法，not in 检测不到（生产实测踩过）。
-if not isinstance(c.get('landings'), list):
-    c['landings'] = []
-    changed = True
-if changed:
-    json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
-    print('[entrypoint] panel.json 已补全缺失字段: server_ip/landings')
-" 2>/dev/null || true
-fi
-
-# v1.5.31: 修复/规范化旧部署遗留的非标准 SS2022 密钥。
-# v1.5.28+ 在 genconf 后执行 sing-box check；sing-box 的 SS2022 password 只接受标准 base64
-#（带 padding），raw/url-safe/完全非法的 SS_KEY 都会导致保存/修复被 decode psk 阻断。
-# 容器重建升级时若 SS 已启用：可解码的 raw/url-safe 密钥规范化为标准 base64；不可解码才重置。
-python3 - <<'PY' 2>/dev/null || true
-import base64, json, os
-CONF='/etc/ansgo/panel.json'; SECRETS='/etc/ansgo/secrets.env'
-try:
-    cfg=json.load(open(CONF))
-except Exception:
-    cfg={}
-if str(cfg.get('svc_ss_enabled','true')).lower() in ('true','1') and os.path.exists(SECRETS):
-    pairs=[]; data={}
-    for line in open(SECRETS):
-        if '=' in line and not line.lstrip().startswith('#'):
-            k,v=line.rstrip('\n').split('=',1); data[k]=v.strip().strip('"')
-        pairs.append(line.rstrip('\n'))
-    method=data.get('SS_METHOD') or cfg.get('ss_method') or '2022-blake3-aes-128-gcm'
-    want=16 if method.startswith('2022-blake3-aes-128') else (32 if method.startswith('2022-blake3-aes-256') else 0)
-    def normalize(k):
-        if want <= 0: return k, False
-        for alt in (k.strip(), k.strip()+'=', k.strip()+'==', k.strip()+'==='):
-            for cand in (alt, alt.replace('-','+').replace('_','/')):
-                try:
-                    raw=base64.b64decode(cand.encode(), validate=True)
-                    if len(raw)==want:
-                        return base64.b64encode(raw).decode(), True
-                    return '', False
-                except Exception:
-                    pass
-        return '', False
-    new, ok = normalize(data.get('SS_KEY',''))
-    changed_msg = '规范化'
-    if want and not ok:
-        new=base64.b64encode(os.urandom(want)).decode(); changed_msg='非法，已自动重置'
-    if want and (not ok or new != data.get('SS_KEY','')):
-        seen=False; out=[]
-        for line in pairs:
-            if line.startswith('SS_KEY='):
-                out.append('SS_KEY='+new); seen=True
-            else:
-                out.append(line)
-        if not seen: out.append('SS_KEY='+new)
-        open(SECRETS,'w').write('\n'.join(out).rstrip('\n')+'\n')
-        os.chmod(SECRETS,0o600)
-        print('[entrypoint] 已将 SS_KEY '+changed_msg+'为 sing-box 接受的标准 base64（SS 客户端需重新复制节点信息）')
-PY
-
 # 生成 sing-box / caddy 配置（幂等；失败时写兜底 Caddyfile，避免 caddy 起不来）
-if /usr/local/bin/ansgo-genconf all >/var/log/ansgo-genconf.log 2>&1; then
+ansgo_log_trim /var/log/ansgo/genconf.log
+if /usr/local/bin/ansgo-genconf all >>/var/log/ansgo/genconf.log 2>&1; then
   log "已生成 sing-box + caddy 配置"
 else
-  log "WARN: ansgo-genconf 失败（见 /var/log/ansgo-genconf.log），写入兜底 Caddyfile"
-  [ -f /etc/caddy/Caddyfile ] || \
-    printf '0.0.0.0:443 {\n  respond "ANS-GO"\n}\n:80 {\n  redir https://%s{uri} 308\n}\n' "$DOMAIN" > /etc/caddy/Caddyfile
+  log "FATAL: ansgo-genconf 失败（见 /var/log/ansgo/genconf.log）"
+  exit 1
 fi
 
 # v1.5.10: --no-caddy 模式 caddy 启停逻辑（修复 v1.5.10 的 bug）
@@ -350,7 +317,7 @@ fi
 #   正确逻辑：caddy_enable=false 且 naive 未装时才不启 caddy；
 #             naive 已装时 caddy 必须启动（naive 依赖 caddy 的 forwardproxy）
 NO_CADDY_MODE=0
-if [ "${NO_CADDY:-0}" = 1 ] || grep -q '"caddy_enable": "false"' "$CONF" 2>/dev/null; then
+if grep -q '"caddy_enable": "false"' "$CONF" 2>/dev/null; then
   NO_CADDY_MODE=1
 fi
 if [ "$NO_CADDY_MODE" = 1 ]; then
@@ -401,16 +368,35 @@ else
   log "无启用的 sing-box 服务：sing-box 保持 disabled（面板内按需安装时再起）"
 fi
 
-# 后台签发真实证书（acme 模式且当前非 LE 且提供了 Dynu 凭证；manual 模式跳过）
-is_le(){ [ -f "$CERTDIR/fullchain.pem" ] \
-  && openssl x509 -in "$CERTDIR/fullchain.pem" -noout -issuer 2>/dev/null \
-  | grep -qi "let's encrypt"; }
-if [ "$CERT_MODE" != "manual" ] && ! is_le && { [ -n "${DYNU_API_KEY:-}" ] || [ -n "${DYNU_CLIENT_ID:-}" ]; }; then
-  log "后台签发 Let's Encrypt 证书（DNS-01，约 1-3 分钟），日志 /var/log/ansgo-cert.log"
-  DOMAIN="$DOMAIN" EMAIL="$EMAIL" \
-    DYNU_API_KEY="${DYNU_API_KEY:-}" DYNU_CLIENT_ID="${DYNU_CLIENT_ID:-}" DYNU_SECRET="${DYNU_SECRET:-}" \
-    nohup bash /usr/local/bin/ansgo-cert-issue.sh > /var/log/ansgo-cert.log 2>&1 &
+# 首次 acme 安装必须拿到有效证书后才算初始化成功；已有有效证书则跳过签发。
+valid_pair(){ cert_is_valid "$CERTDIR/fullchain.pem" "$CERTDIR/privkey.pem"; }
+if [ "$CERT_MODE" != "manual" ]; then
+  existing_le=0
+  if valid_pair; then
+    cert_issuer=$(openssl x509 -in "$CERTDIR/fullchain.pem" -noout -issuer 2>/dev/null || true)
+    case "$cert_issuer" in *"Let's Encrypt"*|*"let's encrypt"*) existing_le=1;; esac
+  fi
+  if [ "$existing_le" = 1 ]; then
+    printf 'SUCCESS existing-cert\n' > /etc/ansgo-cert.status
+  elif [ -n "${DYNU_API_KEY:-}" ] || { [ -n "${DYNU_CLIENT_ID:-}" ] && [ -n "${DYNU_SECRET:-}" ]; }; then
+    ansgo_log_trim /var/log/ansgo/cert-issue.log
+    log "首次启动签发 Let's Encrypt 证书（最多 300 秒），日志 /var/log/ansgo/cert-issue.log"
+    DOMAIN="$DOMAIN" EMAIL="$EMAIL" \
+      DYNU_API_KEY="${DYNU_API_KEY:-}" DYNU_CLIENT_ID="${DYNU_CLIENT_ID:-}" DYNU_SECRET="${DYNU_SECRET:-}" \
+      bash /usr/local/bin/ansgo-cert-issue.sh >/dev/null 2>&1 || { log "FATAL: 首次证书签发失败"; exit 1; }
+    cert_issuer=$(openssl x509 -in "$CERTDIR/fullchain.pem" -noout -issuer 2>/dev/null || true)
+    case "$cert_issuer" in *"Let's Encrypt"*|*"let's encrypt"*) issued_le=1;; *) issued_le=0;; esac
+    if ! valid_pair || [ "$issued_le" != 1 ]; then
+      log "FATAL: 签发后未取得有效 Let's Encrypt 证书"; exit 1
+    fi
+  else
+    log "FATAL: acme 模式缺少 Dynu 凭证，无法取得有效证书"
+    exit 1
+  fi
 fi
+# cron 在镜像中显式 enable，保证 acme.sh 续期计划会被调度。
+mkdir -p /etc/systemd/system/multi-user.target.wants
+ln -sf /lib/systemd/system/cron.service /etc/systemd/system/multi-user.target.wants/cron.service
 
 # 容器内 PATH（含 acme.sh，供面板 exec ansgo-admin/genconf 使用）
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.acme.sh

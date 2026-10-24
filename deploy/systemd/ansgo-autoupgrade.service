@@ -1,0 +1,13 @@
+[Unit]
+Description=ANS-GO weekly upgrade
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/ansgo/panel.json
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=128M
+TimeoutStartSec=20min
+ExecStart=/usr/local/bin/ansgo-upgrade --yes --auto

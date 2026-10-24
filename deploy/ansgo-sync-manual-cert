@@ -28,14 +28,28 @@
 # =============================================================================
 set -uo pipefail
 
-SRC_FULL="/host/manual-certs/fullchain.pem"
-SRC_KEY="/host/manual-certs/privkey.pem"
-DST_DIR="/etc/ssl/ansgo"
+SRC_FULL="${ANSGO_ROOT:-}/host/manual-certs/fullchain.pem"
+SRC_KEY="${ANSGO_ROOT:-}/host/manual-certs/privkey.pem"
+DST_DIR="${ANSGO_ROOT:-}/etc/ssl/ansgo"
 DST_FULL="$DST_DIR/fullchain.pem"
 DST_KEY="$DST_DIR/privkey.pem"
 
-log(){ echo "[ansgo-sync-manual-cert] $*"; }
-die(){ echo "[ansgo-sync-manual-cert] 错误: $*" >&2; exit "${2:-1}"; }
+log(){
+  ansgo_log_trim "$SYNC_LOG" || return 1
+  printf '[ansgo-sync-manual-cert] %s\n' "$*" | tee -a "$SYNC_LOG"
+}
+die(){
+  ansgo_log_trim "$SYNC_LOG" || true
+  printf '[ansgo-sync-manual-cert] 错误: %s\n' "$*" | tee -a "$SYNC_LOG" >&2
+  exit "${2:-1}"
+}
+
+LIB="${ANSGO_LIB:-/usr/local/bin/ansgo-limits}"
+[ -f "$LIB" ] || LIB="$(dirname "${BASH_SOURCE[0]}")/ansgo-limits"
+source "$LIB" || exit 1
+ansgo_logs_init || exit 1
+SYNC_LOG="${ANSGO_ROOT:-}/var/log/ansgo/cert-sync.log"
+ansgo_log_trim "$SYNC_LOG" || exit 1
 
 [ -s "$SRC_FULL" ] || die "同步源证书不存在或为空: $SRC_FULL（请先在宿主执行同步脚本）" 2
 [ -s "$SRC_KEY" ]  || die "同步源私钥不存在或为空: $SRC_KEY（请先在宿主执行同步脚本）" 2
@@ -54,11 +68,13 @@ if command -v openssl >/dev/null 2>&1; then
   fi
   # 比较证书公钥与私钥公钥的 modulus 是否一致（RSA/EC 通用），采用 fail-closed：
   # 任一侧提取为空或二者不一致即拒绝（宁可保留旧证书，也不放过不匹配的新证书）
-  cmod=$(openssl x509 -in "$SRC_FULL" -pubkey -noout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
-  kmod=$(openssl pkey -in "$SRC_KEY" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+  cmod=$(openssl x509 -in "$SRC_FULL" -pubkey -noout 2>/dev/null | openssl sha256 2>/dev/null | awk '{print $NF}') || true
+  kmod=$(openssl pkey -in "$SRC_KEY" -pubout 2>/dev/null | openssl sha256 2>/dev/null | awk '{print $NF}') || true
   if [ -z "$cmod" ] || [ -z "$kmod" ] || [ "$cmod" != "$kmod" ]; then
     die "证书与私钥不匹配或无法提取公钥指纹（cmod=${cmod:-空}, kmod=${kmod:-空}），拒绝覆盖现有证书" 4
   fi
+else
+  die "缺少 openssl，拒绝未经校验证书" 3
 fi
 
 # 无变化判定：若两文件都存在且与源完全一致，直接退出 0
@@ -75,26 +91,46 @@ if [ "$unchanged" = 1 ]; then
 fi
 
 # 原子替换：先写临时文件，再 mv 到目标。若私钥替换失败，回滚证书以避免半替换的不匹配对。
-tmp_full="$(mktemp "$DST_DIR/fullchain.pem.XXXXXX")" || die "无法创建临时文件" 1
-tmp_key="$(mktemp "$DST_DIR/privkey.pem.XXXXXX")" || { rm -f "$tmp_full"; die "无法创建临时文件" 1; }
-trap 'rm -f "$tmp_full" "$tmp_key"' EXIT
+stage="$(mktemp -d "$DST_DIR/.ansgo-sync.XXXXXX")" || die "无法创建临时目录" 1
+tmp_full="$stage/fullchain.pem"
+tmp_key="$stage/privkey.pem"
+changed=0
+restore_pair(){
+  local rc=$?
+  trap - EXIT
+  if [ "$rc" -ne 10 ] && [ "$changed" = 1 ]; then
+    # 任一步失败都恢复完整旧对；首次导入则删除半成品。
+    if [ -e "$stage/old-full" ]; then
+      cp -p "$stage/old-full" "$DST_FULL" || rc=1
+    else rm -f "$DST_FULL"; fi
+    if [ -e "$stage/old-key" ]; then
+      cp -p "$stage/old-key" "$DST_KEY" || rc=1
+    else rm -f "$DST_KEY"; fi
+  fi
+  rm -rf "$stage"
+  exit "$rc"
+}
+trap restore_pair EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+[ ! -e "$DST_FULL" ] || cp -p "$DST_FULL" "$stage/old-full" || die "备份旧证书失败" 1
+[ ! -e "$DST_KEY" ] || cp -p "$DST_KEY" "$stage/old-key" || die "备份旧私钥失败" 1
 
 install -m 0644 "$SRC_FULL" "$tmp_full" || die "写入临时证书失败" 1
 install -m 0600 "$SRC_KEY"  "$tmp_key"  || die "写入临时私钥失败" 1
 
-# 先替换私钥；私钥成功后再替换证书（证书替换失败时回滚私钥，保持成对一致）
+# 先替换私钥；私钥成功后再替换证书（证书替换失败时回滚私钥，保持成对一致）。
+# changed 在第一份文件落下后即置位：即使第二份 mv 失败，也必须由 trap 成对回滚。
 if ! mv -f "$tmp_key" "$DST_KEY" 2>/dev/null; then
   die "替换 $DST_KEY 失败（旧证书保留）" 1
 fi
+changed=1
 if ! mv -f "$tmp_full" "$DST_FULL" 2>/dev/null; then
-  # 证书替换失败：回滚私钥到旧文件（保持成对）
-  rm -f "$DST_KEY"
-  die "替换 $DST_FULL 失败，已回滚私钥（旧证书保留）" 1
+  die "替换 $DST_FULL 失败，恢复旧证书与私钥" 1
 fi
-trap - EXIT
 
-chmod 0644 "$DST_FULL" 2>/dev/null || true
-chmod 0600 "$DST_KEY"  2>/dev/null || true
+chmod 0644 "$DST_FULL" || die "证书权限设置失败" 1
+chmod 0600 "$DST_KEY" || die "私钥权限设置失败" 1
 
-log "证书已同步到 $DST_DIR（fullchain.pem + privkey.pem）。请执行 ansgo-cert-reload 重启三服务。"
+log "证书已同步到 ${DST_DIR}（fullchain.pem + privkey.pem）。请执行 ansgo-cert-reload 重启三服务。"
 exit 10
