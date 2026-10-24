@@ -1,183 +1,125 @@
 #!/usr/bin/env node
-// =============================================================================
-// ANS-GO 面板 UI 本地验收夹具（无敏感假 API，零依赖 Node http）
-//
-// 供主代理用浏览器实际渲染验收 deploy/panel/web/index.html 的前端改动
-// （v1.5.37：ACME 精简 / OAuth 迁移提示 / 同步脚本即时切换 / naive 域名 / 设置文案）。
-//
-// 启动（仓库根目录）：
-//   node scripts/panel-ui-fixture.mjs                       # 裸金属 + acme 默认场景
-//   ANSGO_FIXTURE_DOCKER=1 node scripts/panel-ui-fixture.mjs          # Docker 形态
-//   ANSGO_FIXTURE_DOCKER=1 ANSGO_FIXTURE_CERT_MODE=manual node scripts/panel-ui-fixture.mjs
-//   ANSGO_FIXTURE_DYNU=oauth node scripts/panel-ui-fixture.mjs        # OAuth-only 迁移提示
-//   ANSGO_FIXTURE_DYNU=none  node scripts/panel-ui-fixture.mjs        # 未配置凭证
-//   PORT=9000 node scripts/panel-ui-fixture.mjs             # 自定义端口（默认 8788）
-//
-// 全部数据均为假值：域名 your-domain.com、IP 用 TEST-NET 保留段（203.0.113.0/24）、
-// 密钥/密码为明显假串。无任何真实部署信息。登录页任意账号密码可登录。
-// =============================================================================
+// 零依赖本地假后端；仅使用保留 IP、示例域名与假凭证。也供 VM 回归测试复用。
 import { createServer } from 'node:http';
-import { readFileSync, existsSync } from 'node:fs';
-import { dirname, join, extname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const WEB = join(ROOT, 'deploy/panel/web');
-const PORT = Number(process.env.PORT || 8788);
-
-// ---- 场景开关（环境变量） ----
-const SC = {
-  docker: process.env.ANSGO_FIXTURE_DOCKER === '1',          // Docker 形态（宿主证书 UI + 同步脚本区）
-  certMode: process.env.ANSGO_FIXTURE_CERT_MODE || 'acme',   // acme | manual
-  dynu: process.env.ANSGO_FIXTURE_DYNU || 'apikey',          // apikey | oauth | both | none
-};
-const dynu = {
-  apikey: { has_api_key: true, has_oauth: false },
-  oauth: { has_api_key: false, has_oauth: true },            // OAuth-only → 迁移提示
-  both: { has_api_key: true, has_oauth: true },
-  none: { has_api_key: false, has_oauth: false },
-}[SC.dynu] || { has_api_key: false, has_oauth: false };
-
-const now = new Date('2026-09-06T12:00:00Z');
-const DATA = {
-  domain: 'your-domain.com',
-  serverIp: '203.0.113.7', // TEST-NET-3，非真实地址
-};
-
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css' };
-
-const api = {
-  'auth': { authed: true, user: 'admin', version: '1.5.37' },
-  'login': { ok: true },
-  'logout': { ok: true },
-  'dashboard': {
-    services: { anytls: 'active', naive: 'active', ss: 'active', socks: 'inactive', panel: 'active' },
-    ports: { anytls: 23458, naive: 23460, ss: 23457, socks: 23459, panel: 23456 },
-    svc_enabled: { anytls: true, naive: true, ss: true, socks: true },
-    mem: { total: 480000, used: 120000 }, load: [0.1, 0.2, 0.15], uptime: 72.5, tcp: 18,
-    domain: DATA.domain,
-    cert: { subject: DATA.domain, issuer: "Let's Encrypt", issuer_org: "Let's Encrypt", not_before: '2026-08-01', not_after: '2026-10-01', days_left: 25 },
-  },
-  'node': {
-    // 字段与 URI 严格对齐真实后端 nodeHandler/buildURIs（v1.5.37）语义：
-    //   ss     ss://<base64url-nopad(method:key)>@<host>:<port>#<frag>   （SIP002 userinfo）
-    //   anytls anytls://<pass>@<host>:<port>/?sni=<domain>#<frag>
-    //   socks  socks5://<user>:<pass-queryescape>@<host>:<port>#<frag>
-    //   naive  naive+https://<user>:<pass-queryescape>@<domain>:<port>#<frag>（域名，不用 IP）
-    //   host 字段：连接主机（server_ip 优先），naive 固定域名；sni 始终域名
-    domain: DATA.domain,
-    server_ip: DATA.serverIp,
-    server_ip_hint: '',
-    ss: (() => {
-      const method = '2022-blake3-aes-128-gcm', key = 'ZmFrZWtleS1iYXNlNjQtMTY='; // 假密钥
-      const userinfo = Buffer.from(method + ':' + key).toString('base64url'); // 无 padding，与 RawURLEncoding 一致
-      return { enabled: true, uri: `ss://${userinfo}@${DATA.serverIp}:23457#NodeB-SS`, host: DATA.serverIp, port: 23457, method, password: key };
-    })(),
-    anytls: { enabled: true, uri: `anytls://fakepass@${DATA.serverIp}:23458/?sni=${DATA.domain}#NodeB-AT`, host: DATA.serverIp, port: 23458, password: 'fakepass', sni: DATA.domain },
-    naive: { enabled: true, uri: `naive+https://fakeuser:fakepass@${DATA.domain}:23460#NodeB-NV`, host: DATA.domain, port: 23460, user: 'fakeuser', pass: 'fakepass', password: 'fakepass', sni: DATA.domain },
-    socks: { enabled: true, uri: `socks5://fakeuser:fakepass@${DATA.serverIp}:23459#NodeB-SK`, host: DATA.serverIp, port: 23459, user: 'fakeuser', pass: 'fakepass', password: 'fakepass' },
-    landings: [{ enabled: true, name: 'HK', via: 'ss-landing', uri: `anytls://fakepass@${DATA.serverIp}:23461/?sni=${DATA.domain}#NodeB-LD-HK`, host: DATA.serverIp, port: 23461, password: 'fakepass', sni: DATA.domain, remote_type: 'ss' }],
-  },
-  'settings': {
-    panel_title: 'NodeB', url_path: '/fixture01/', admin_user: 'admin', session_hours: 8, panel_port: 23456,
-    login_lock_threshold: 5, login_lock_minutes: 10, server_ip: DATA.serverIp, server_ip_hint: '', server_ip_resolved: DATA.serverIp,
-    caddy_enable: 'true', disguise_panel: 'proxy:https://example.com', disguise_naive: 'proxy:https://example.com',
-    anytls_port: 23458, naive_port: 23460, ss_port: 23457, socks_port: 23459,
-  },
-  'landings': { landings: [
-    { id: 1, name: 'HK', port: 23461, enabled: true, password: 'fakepass', has_keys: true,
-      remote_enabled: true, remote_type: 'ss', remote_host: '198.51.100.20', remote_port: 8388,
-      remote_method: '2022-blake3-aes-128-gcm', remote_password: 'fakeremotekey' },
-    { id: 2, name: '直连组', port: 23462, enabled: false, password: '', has_keys: false,
-      remote_enabled: false, remote_type: 'ss', remote_host: '', remote_port: 0, remote_method: '2022-blake3-aes-128-gcm', remote_password: '' },
-  ] },
-  'cert': { subject: DATA.domain, issuer: "Let's Encrypt", issuer_org: "Let's Encrypt", not_before: '2026-08-01', not_after: '2026-10-01', days_left: 25 },
-  'cert/config': {
-    mode: SC.certMode,
-    fullchain: '/etc/letsencrypt/live/your-domain.com/fullchain.pem',
-    privkey: '/etc/letsencrypt/live/your-domain.com/privkey.pem',
-    host_fullchain: SC.docker ? '/www/server/panel/vhost/cert/your-domain.com/fullchain.pem' : '',
-    host_privkey: SC.docker ? '/www/server/panel/vhost/cert/your-domain.com/privkey.pem' : '',
-    runtime_fullchain: '/etc/ssl/ansgo/fullchain.pem', runtime_privkey: '/etc/ssl/ansgo/privkey.pem',
-    docker_mode: SC.docker, domain: DATA.domain,
-    dynu, dynu_configured: dynu.has_api_key || dynu.has_oauth,
-    acme_email: 'admin@your-domain.com',
-  },
-  'detect-public-ip': { ok: true, ip: DATA.serverIp },
-  'logs': { logs: '[fixture] 示例日志行 1\n[fixture] 示例日志行 2' },
-};
-// POST 端点统一假成功（设置保存不返回 new_url，避免页面跳转打断验收）
-const postOK = {
-  'settings': { ok: true },
-  'port': { ok: true }, 'key': { ok: true }, 'regen': { ok: true },
-  'svc-install': { ok: true }, 'service': { ok: true }, 'repair': { ok: true, results: {} },
-  'health': { ok: true, enabled: true, active: 'active', unit: 'sing-box.service', port: 23458, port_listening: 'yes', tcp_connect: 'yes', tcp_ms: 3, summary: 'fixture: 一切正常（假数据）' },
-  'landings': { ok: true }, 'landings/update': { ok: true }, 'landings/regen': { ok: true }, 'landings/delete': { ok: true },
-  'cert/config': { ok: true }, 'cert/issue': { ok: true, log: 'fixture: 签发成功（假）' },
-  'cert/renew': { ok: true }, 'cert/reload': { ok: true },
-};
-
-const server = createServer((req, res) => {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-  const p = url.pathname;
-  const send = (code, body, type = 'application/json; charset=utf-8') => {
-    res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' });
-    res.end(typeof body === 'string' ? body : JSON.stringify(body));
+export function createFixture({ docker = false, certMode = 'acme', dynu = 'apikey' } = {}) {
+  const domain = 'your-domain.com', ip = '203.0.113.7', password = 'fake-password', ssKey = 'AAAAAAAAAAAAAAAAAAAAAA==';
+  const cert = { subject: domain, issuer: "Let's Encrypt", issuer_org: "Let's Encrypt", not_before: '2026-10-01', not_after: '2026-12-30', days_left: 67 };
+  const landings = [
+    { id: '1', name: '远端出口', enabled: true, port: 23461, has_keys: true, password, uuid: 'fake-uuid', remote_enabled: true, remote_type: 'ss', remote_ss: { host: '203.0.113.20', port: 8388, method: '2022-blake3-aes-128-gcm', password: ssKey }, remote_socks: { host: '203.0.113.21', port: 1080, user: 'fake-user', password: 'fake-socks-password' }, remote_via: 'ss-landing' },
+    { id: '2', name: '备用线路', enabled: false, port: 23462, has_keys: true, password, uuid: 'fake-uuid-2', remote_enabled: false, remote_type: 'socks', remote_ss: {}, remote_socks: {}, remote_via: 'direct' },
+  ];
+  const data = {
+    auth: { authed: true, user: 'admin', version: '1.6.0-dev' },
+    dashboard: {
+      services: { anytls: 'active', naive: 'active', ss: 'active', socks: 'inactive', panel: 'active', caddy: 'active', 'sing-box': 'active' },
+      svc_enabled: { anytls: true, naive: true, ss: true, socks: false },
+      ports: { anytls: 23458, naive: 23460, ss: 23457, socks: 23459, panel: 23456 },
+      mem: { total: 262144, used: 82432, avail: 179712 }, load: [0.12, 0.08, 0.05], uptime: 72.5, tcp: 18, domain, cert, landings_enabled: 1,
+    },
+    node: {
+      domain, server_ip: ip, server_ip_hint: '',
+      anytls: { enabled: true, host: ip, port: 23458, sni: domain, password, uri: `anytls://${password}@${ip}:23458/?sni=${domain}#Demo-AT` },
+      naive: { enabled: true, host: domain, port: 23460, user: 'fake-user', pass: password, password, sni: domain, uri: `naive+https://fake-user:${password}@${domain}:23460#Demo-NV` },
+      ss: { enabled: true, host: ip, port: 23457, password: ssKey, method: '2022-blake3-aes-128-gcm', uri: `ss://${Buffer.from('2022-blake3-aes-128-gcm:' + ssKey).toString('base64url')}@${ip}:23457#Demo-SS` },
+      socks: { enabled: false, host: ip, port: 23459, user: 'fake-user', pass: password, password, uri: '' }, landings: [],
+    },
+    settings: { domain, panel_title: 'Demo', url_path: '/fixture01/', admin_user: 'admin', session_hours: 8, panel_port: 23456, login_lock_threshold: 5, login_lock_minutes: 10, server_ip: ip, server_ip_resolved: ip, server_ip_hint: '', caddy_enable: 'true', disguise_panel: 'page', disguise_naive: 'proxy:https://your-domain.com', anytls_port: 23458, naive_port: 23460, ss_port: 23457, socks_port: 23459, backup_keep: 5 },
+    landings: { landings }, cert,
+    'cert/config': { mode: certMode, docker_mode: docker, domain, fullchain: '/etc/ssl/ansgo/fullchain.pem', privkey: '/etc/ssl/ansgo/privkey.pem', host_fullchain: '/etc/letsencrypt/live/your-domain.com/fullchain.pem', host_privkey: '/etc/letsencrypt/live/your-domain.com/privkey.pem', runtime_fullchain: '/etc/ssl/ansgo/fullchain.pem', runtime_privkey: '/etc/ssl/ansgo/privkey.pem', cert_info: cert, dynu: { has_api_key: ['apikey', 'both'].includes(dynu), has_oauth: ['oauth', 'both'].includes(dynu) }, acme_email: 'admin@your-domain.com' },
+    'detect-public-ip': { ok: true, ip, source: 'fixture' },
+    logs: { logs: 'Oct 24 12:00:01 ansgo-panel: 面板已启动（本地假数据）\nOct 24 12:00:02 sing-box: AnyTLS inbound ready\nOct 24 12:00:03 caddy: TLS certificate loaded' },
+    'system/info': { version: 'v1.6.0-dev', deploy_mode: docker ? 'docker' : 'metal', arch: 'amd64', auto_upgrade: false, auto_upgrade_supported: !docker, upgrade_supported: !docker, mem_total_kb: 262144, disk: { total: 4 * 1024 ** 3, used: 1.2 * 1024 ** 3, avail: 2.8 * 1024 ** 3 }, usage: { backups_bytes: 42 * 1024 ** 2, backups_count: 5, journal_bytes: 8 * 1024 ** 2, logs_bytes: 128 * 1024, probe_tmp_bytes: 0 }, limits: { panel_mem_max: '64M', singbox_mem_max: '96M', caddy_mem_max: '80M' } },
+    'system/upgrade-status': { running: false, result: '', log: '' },
   };
-  // 静态（HTML 每请求实时读盘：改 index.html 无需重启夹具）
-  if (p === '/' || p === '/index.html' || p === '/fixture01/' || p.startsWith('/fixture01')) {
-    let page = readFileSync(join(WEB, 'index.html'), 'utf8');
-    // ?noconfirm：自动化浏览器常默认 dismiss confirm/prompt 导致保存流程静默取消，
-    // 注入自动同意 stub 方便无人值守验收（真实交互不受影响）
-    if (url.searchParams.has('noconfirm')) {
-      page = page.replace('<head>', '<head><script>window.confirm=()=>true;window.alert=()=>{};window.prompt=(m,d)=>(d!==undefined?d:null)</script>');
+  let nextId = 3, upgradeStep = -1;
+  function syncNodes() {
+    for (const key of ['ss', 'anytls', 'socks', 'naive']) {
+      const n = data.node[key], host = key === 'naive' ? domain : ip;
+      n.host = host;
+      if (!n.enabled) { n.uri = ''; continue; }
+      const secret = encodeURIComponent(n.password), user = encodeURIComponent(n.user || '');
+      if (key === 'ss') n.uri = `ss://${Buffer.from(n.method + ':' + n.password).toString('base64url')}@${host}:${n.port}#Demo-SS`;
+      else if (key === 'anytls') n.uri = `anytls://${secret}@${host}:${n.port}/?sni=${domain}#Demo-AT`;
+      else n.uri = `${key === 'socks' ? 'socks5' : 'naive+https'}://${user}:${secret}@${host}:${n.port}#Demo-${key === 'socks' ? 'SK' : 'NV'}`;
     }
-    return send(200, page, MIME['.html']);
+    for (const l of landings) l.remote_via = l.remote_enabled ? (l.remote_type === 'ss' ? 'ss-landing' : 'socks5-landing') : 'direct';
+    data.node.landings = landings.filter(l => l.enabled).map(l => ({ ...l, host: ip, sni: domain, via: l.remote_enabled ? (l.remote_type === 'ss' ? 'ss-landing' : 'socks5-landing') : 'direct', uri: `anytls://${l.password}@${ip}:${l.port}/?sni=${domain}#Demo-LD-${encodeURIComponent(l.name)}` }));
   }
-  if (p === '/static/qrcode.min.js') {
-    return send(200, readFileSync(join(WEB, 'qrcode.min.js'), 'utf8'), MIME['.js']);
-  }
-  // API（相对路径，面板以 api/... 调用）
-  if (p.startsWith('/api/')) {
-    const key = p.replace(/^\/api\//, '').replace(/\/$/, '');
-    if (req.method === 'POST') {
-      let body = '';
-      req.on('data', (c) => { body += c; });
-      req.on('end', () => {
-        // 模拟真实后端保存副作用：POST cert/config 的 mode/路径合并回 GET 响应，
-        // 保存后前端 loadCert 重渲染才能拿到新已存模式（否则验收会误判「保存无效」）
-        if (key === 'cert/config' && body) {
-          try {
-            const b = JSON.parse(body);
-            if (b.mode === 'acme' || b.mode === 'manual') api['cert/config'].mode = b.mode;
-            if (typeof b.host_fullchain === 'string') api['cert/config'].host_fullchain = b.host_fullchain;
-            if (typeof b.host_privkey === 'string') api['cert/config'].host_privkey = b.host_privkey;
-            // 凭证只回传存在状态（与真实后端一致，绝不回明文）
-            if (b.dynu_api_key) api['cert/config'].dynu.has_api_key = true;
-            if (typeof b.acme_email === 'string') api['cert/config'].acme_email = b.acme_email;
-          } catch {}
-        }
-        if (postOK[key] !== undefined) return send(200, postOK[key]);
-        return send(200, { ok: true, fixture: true });
-      });
-      return;
+  syncNodes();
+  const response = (body, status = 200) => ({ status, body: structuredClone(body) });
+  function request(key, method = 'GET', body = {}) {
+    key = key.split('?')[0];
+    if (method === 'GET') {
+      if (key === 'system/upgrade-status' && upgradeStep >= 0) {
+        upgradeStep++;
+        data[key] = { running: upgradeStep < 3, result: upgradeStep < 3 ? '' : 'success', log: '[fixture] 下载与校验完成\n[fixture] 备份完成\n' + (upgradeStep < 3 ? '正在重新启动面板…' : '升级成功，面板已恢复') };
+      }
+      return data[key] ? response(data[key]) : response({ error: '未知夹具接口' }, 404);
     }
-    if (api[key] !== undefined) return send(200, api[key]);
-    return send(200, { fixture: true });
+    switch (key) {
+      case 'login': data.auth.authed = true; return response({ ok: true });
+      case 'logout': data.auth.authed = false; return response({ ok: true });
+      case 'settings': Object.assign(data.settings, body); break;
+      case 'cert/config': {
+        const { dynu_api_key, ...fields } = body;
+        Object.assign(data[key], fields);
+        if (dynu_api_key) data[key].dynu.has_api_key = true;
+        break;
+      }
+      case 'cert/issue': case 'cert/renew': case 'cert/reload': return response({ ok: true, cert, log: 'fixture：证书操作完成（假数据）' });
+      case 'landings': {
+        const l = { ...structuredClone(landings[0]), ...body, id: String(nextId++), password: 'fake-new-password', remote_enabled: false };
+        landings.push(l); syncNodes(); return response({ ok: true, landing: l });
+      }
+      case 'landings/update': case 'landings/regen': case 'landings/delete': {
+        const index = landings.findIndex(l => l.id === String(body.id));
+        if (index < 0) return response({ error: '落地不存在' }, 404);
+        if (key.endsWith('delete')) landings.splice(index, 1);
+        else if (key.endsWith('regen')) landings[index].password = 'fake-regenerated-password';
+        else Object.assign(landings[index], body);
+        syncNodes(); return response({ ok: true, landing: landings[index] });
+      }
+      case 'port': data.dashboard.ports[body.target] = body.port; if (data.node[body.target]) data.node[body.target].port = body.port; break;
+      case 'key': {
+        const n = data.node[body.target]; if (!n) return response({ error: '未知服务' }, 400);
+        Object.assign(n, { ...body, password: body.key || body.pass || n.password }); break;
+      }
+      case 'service': data.dashboard.services[body.target] = body.action === 'stop' ? 'inactive' : 'active'; break;
+      case 'svc-install': data.dashboard.svc_enabled[body.service] = body.action === 'install'; data.dashboard.services[body.service] = body.action === 'install' ? 'active' : 'inactive'; data.node[body.service].enabled = body.action === 'install'; break;
+      case 'regen': data.node[body.target].password = 'fake-regenerated-password'; break;
+      case 'repair': return response({ ok: true, results: { 'sing-box': { ok: true, active: 'active' }, caddy: { ok: true, active: 'active' } } });
+      case 'health': return response({ ok: true, target: body.target, unit: body.target === 'naive' ? 'caddy' : 'sing-box', enabled: true, active: 'active', port: '23458', port_listening: 'yes', tcp_connect: 'yes', tcp_ms: 3, landing_remote: body.target.startsWith('landing-') ? 'skip' : '', time_diag: { now_local: '2026-10-24 12:00:00', now_utc: '2026-10-24 04:00:00', timezone: 'Asia/Singapore', offset: '+08:00', ntp_synchronized: docker ? 'host' : 'yes' }, summary: '假数据：入口与 TCP 握手正常' });
+      case 'system/check-update': return response({ ok: true, current: 'v1.6.0-dev', latest: 'v1.6.0', has_update: true, url: '' });
+      case 'system/upgrade': if (docker) return response({ ok: false, error: 'Docker 请在宿主升级', hint: '使用宿主升级命令' }); upgradeStep = 0; return response({ ok: true, started: true });
+      case 'system/auto-upgrade': if (docker) return response({ ok: false, error: 'Docker 不支持自动升级' }); data['system/info'].auto_upgrade = body.enabled; return response({ ok: true, enabled: body.enabled });
+      case 'system/cleanup': data['system/info'].usage.backups_bytes = 20 * 1024 ** 2; return response({ ok: true, freed_bytes: 22 * 1024 ** 2, log: 'fixture：清理旧备份和过期日志完成' });
+      default: return response({ error: '未知夹具接口' }, 404);
+    }
+    syncNodes();
+    return response({ ok: true });
   }
-  if (existsSync(join(WEB, p)) && !p.includes('..')) {
-    return send(200, readFileSync(join(WEB, p)), MIME[extname(p)] || 'application/octet-stream');
-  }
-  send(404, 'not found (fixture)', 'text/plain');
-});
+  return { data, request };
+}
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`ANS-GO 面板 UI 验收夹具已启动（假数据，无敏感信息）`);
-  console.log(`  地址:      http://127.0.0.1:${PORT}/  （已预登录 authed，任意账号密码也可登录）`);
-  console.log(`  提示:      加 ?noconfirm 自动同意 confirm/prompt（自动化浏览器默认 dismiss 弹窗会让保存静默取消）`);
-  console.log(`  当前场景:  形态=${SC.docker ? 'Docker' : '裸金属'} / 证书=${SC.certMode} / Dynu=${SC.dynu}`);
-  console.log(`  场景切换:  ANSGO_FIXTURE_DOCKER=1 | ANSGO_FIXTURE_CERT_MODE=manual | ANSGO_FIXTURE_DYNU=apikey|oauth|both|none`);
-  console.log(`  验收要点:  证书管理页（ACME 仅 API Key+邮箱；OAuth-only 迁移提示；Docker+manual 同步脚本随下拉即时显隐）、`);
-  console.log(`             节点信息页（Naive 连接地址=域名，其余=203.0.113.7；复制/二维码同 URI）、`);
-  console.log(`             面板设置页（公网 IP 首次自动保存/手动覆盖文案）`);
-});
+export function startFixture(port = Number(process.env.PORT || 8788)) {
+  const fixture = createFixture({ docker: process.env.ANSGO_FIXTURE_DOCKER === '1', certMode: process.env.ANSGO_FIXTURE_CERT_MODE || 'acme', dynu: process.env.ANSGO_FIXTURE_DYNU || 'apikey' });
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost');
+    let path = url.pathname.replace(/^\/fixture01(?=\/)/, '');
+    const send = (status, body, type = 'application/json; charset=utf-8') => { res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' }); res.end(typeof body === 'string' ? body : JSON.stringify(body)); };
+    if (path === '/' || path === '/index.html') return send(200, readFileSync(join(ROOT, 'deploy/panel/web/index.html'), 'utf8'), 'text/html; charset=utf-8');
+    if (path === '/static/qrcode.min.js') return send(200, readFileSync(join(ROOT, 'deploy/panel/web/qrcode.min.js'), 'utf8'), 'application/javascript');
+    if (!path.startsWith('/api/')) return send(404, 'not found', 'text/plain');
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 65536) req.destroy(); });
+    req.on('end', () => { try { const r = fixture.request(path.slice(5), req.method, body ? JSON.parse(body) : {}); send(r.status, r.body); } catch { send(400, { error: '无效 JSON' }); } });
+  });
+  server.listen(port, '127.0.0.1', () => console.log(`ANS-GO v1.6.0 UI 夹具（假数据） http://127.0.0.1:${port}/fixture01/`));
+  return server;
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) startFixture();
