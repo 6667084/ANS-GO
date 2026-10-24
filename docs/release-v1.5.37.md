@@ -1,6 +1,6 @@
-# ANS-GO v1.5.37 Release Notes（开发中 / 待发布）
+# ANS-GO v1.5.37 Release Notes
 
-> 🚧 **状态：开发中，尚未发布。** 截至 v1.5.37 发版前，最新已发布版本为 **v1.5.36**。本文描述的均为**已实现、待发布**的最终行为（与当前源码一致），但**尚未创建 release / 上传资产 / 推送镜像 / 部署服务器**，发版以 GitHub Releases 实际标签与产物（release + 6 资产 + ghcr.io 镜像）为准，不得提前按已发布口径引用。本文不含任何真实 IP / 域名 / 凭证。
+> **状态：已发布。** v1.5.37 的 GitHub Release、6 项资产与 ghcr.io 镜像均已就绪。本文不含任何真实 IP、域名或凭证。
 
 ## 变更清单
 
@@ -13,7 +13,7 @@
   - **直连出网**：HTTP 客户端 `Proxy=nil`，忽略 `HTTP(S)_PROXY` 等环境代理变量，测得本机真实公网**出口** IPv4
   - **不跟随重定向**：echo 端点不该重定向，3xx 按非 200 拒绝（防被劫持端点把探测导向任意目标）
   - **响应限长**：响应体最多读 64 字节，超长视为异常响应拒绝（防被劫持端点倾倒数据）
-  - **拒绝内网 / 保留 / 非法地址**：`isPrivateIP()` 覆盖 RFC1918 / CGNAT(100.64.0.0/10) / ULA(fc00::/7) / 回环 / 链路本地 / 未指定(0.0.0.0、::) / 组播 / IPv4 保留段 240.0.0.0/4（含广播），非法 IP 文本一律拒绝
+  - **拒绝内网 / 保留 / 非法地址**：`isPrivateIP()` 覆盖 RFC1918、共享地址、ULA、回环、链路本地、未指定、组播与 IPv4 保留段，非法 IP 文本一律拒绝
   - **总超时 18s**：一次完整探测（3 端点 × 单端点 6s 串行）整体 18s 上限；调用方 ctx 已有 deadline 时以 deadline 为准
   - **原子落盘**：探测结果经配置锁内复查 `server_ip` 仍为空才写入（tmp+rename 原子替换）；探测期间用户已手动保存则放弃写入
 - **边界**：
@@ -70,17 +70,10 @@
 - 已设置 `server_ip` 的部署升级后行为不变（不覆盖、不触发自动查询）
 - `panel.json` 无破坏性字段变更；服务 / 落地 / 证书配置全部向后兼容；旧 OAuth Dynu 凭证部署的签发 / 续期不受影响
 
-## 本地验证状态（截至本文最后更新，开发机执行；不含发版产物验证）
+## 验证状态
 
 - Go 回归测试（`deploy/panel`）：全部通过（含启动探测 / 原子持久化 / 并发竞态、URI IPv6 括号、设置保存字段语义、落地与标题回归等）
 - `scripts/test-install-params.sh`：105/105 通过（参数校验 / acme 缺凭证中止语义 / panel.json 生成函数 / ansgo.env 特殊字符跨两种 dotenv 解析器还原）
 - `scripts/test-entrypoint-panel-json.sh`：12/12 通过（原子写 / JSON 校验拦截 / 失败中止容器初始化 / install→entrypoint 全链路标题还原）
 - `scripts/test-panel-ui.mjs`：39/39 通过（cert 模式切换显隐与未保存操作隐藏 / server_ip 初值语义等）
-- 发版产物（release 6 资产 / ghcr 镜像 / 服务器升级验证）**尚未执行**——见下方发版前检查
-
-## 发版前检查（供执行者）
-
-- [ ] `git tag v1.5.37 && git push --tags` 触发 CI（ghcr.io 镜像 + 6 资产自动上传）
-- [ ] `gh release view v1.5.37 --json assets --jq '[.assets[].name]'` 确认 6 项资产齐全
-- [ ] 行为验证：空 `server_ip` 启动自动回填一次（公网 IPv4）/ 已设不覆盖 / `--server-ip` 优先且跳过查询（IPv4/IPv6 校验、非法中止）/ 查询失败不阻塞 / 新装 acme 缺 API Key + OAuth 半对被中止 / AT·落地 AT·SS·SOCKS URI 优先 IP（IPv6 自动加括号）且 SNI 为域名 / Naive URI 保留域名 / 含特殊字符标题裸金属 + Docker 均正确还原 / Docker manual 同步脚本随 cert_mode 切换即时显隐、未保存切换时旧操作隐藏 / server_ip 空初值未编辑保存不抹掉自动值、显式清空仍生效
-- [ ] Release notes 发布时核对并移除「开发中 / 待发布」标注
+- 发布资产已核对：release 6 项资产与镜像均已生成。

@@ -7,7 +7,7 @@
 >
 > 📌 **所有命令默认以 `root` 用户执行**。
 >
-> 开发中变更（**v1.5.37 / 待发布，尚未发版**）：① `--server-ip`（显式公网**入口** IPv4，优先级最高，填写后跳过自动查询）与 `--panel-title`（节点信息基名）安装参数，裸金属/Docker 通用；② `server_ip` 为空时面板普通启动异步查询一次公网 IPv4 **出口**并自动保存（已设不覆盖、失败不阻塞、直连不走环境代理）；③ 节点 URI：AT/落地 AT/SS/SOCKS 优先 IP（SNI 仍域名），Naive 保留域名；④ Dynu 凭证 API Key 主引导（OAuth 旧配置兼容）；⑤ Docker manual 证书同步脚本仅 Docker+manual 显示、切换立即隐藏。规划见 [`../docs/release-v1.5.37.md`](../docs/release-v1.5.37.md)。
+> **v1.6.0（本版）**：落地服务使用双协议独立草稿和事务化配置；新控制台增加系统维护；资源、日志和备份均有低配机边界；统一升级器先暂存校验再切换，并支持默认关闭的自动升级。v1.5.37 已发布，详见 [`../docs/release-v1.5.37.md`](../docs/release-v1.5.37.md)；本版详见 [`../docs/release-v1.6.0.md`](../docs/release-v1.6.0.md)。
 >
 > 历史进行中变更（均已发版）：SOCKS5（sing-box inbound，强制用户名/密码）与面板自定义网页标题（v1.5.16）；NaiveProxy 保留普通可选部署但不参与落地；**v1.5.26 起落地服务支持创建多个**（每个独立端口/凭证/远端出口），远端落地出口支持 SS 和 SOCKS5 两种协议。
 
@@ -34,11 +34,13 @@
 |------|--------|------|
 | [`../install.sh`](../install.sh) | 服务器执行 | ⭐ 一键部署（交互式 + 带参数 + 卸载）|
 | [`upgrade.sh`](upgrade.sh) | 服务器执行 | ⭐ 已部署服务器的跨版本升级（裸金属/Docker 自动识别，自动备份）|
+| `ansgo-limits` | 安装/升级时执行 | 生成三服务资源 drop-in、日志目录、journald 和 sysctl 项目专属边界 |
 | `dns_dynukey.sh` | `/root/.acme.sh/dnsapi/` | acme.sh Dynu DNS-01 钩子（API Key） |
 | `ansgo-cert-issue.sh` | 一次性执行 | 装 acme.sh + 签发 ECDSA 证书（A 默认 / B 降级），支持 vendored acme.sh |
 | `ansgo-cert-reload` | `/usr/local/bin/` | 证书续期/替换后 reload 三服务（v1.5.0+ 改为「配置存在即 reload」，兼容手动证书）|
 | `ansgo-genconf` | `/usr/local/bin/` | 从 `panel.json` + `secrets.env` 重新生成 sing-box / caddy 配置（v1.5.12 修复落地服务路由规则）|
 | `ansgo-admin` | `/usr/local/bin/` | 离线管理脚本（面板全挂也能 SSH 管理一切）|
+| `systemd/ansgo-autoupgrade.{service,timer}` | `/etc/systemd/system/` | 默认关闭的低优先级周度自动升级 |
 | `ansgo-panel.service` | `/etc/systemd/system/` | 面板 systemd unit |
 | `systemd/{sing-box,caddy}.service` | `/etc/systemd/system/` | 代理服务 unit |
 | `Dockerfile.allinone` / `docker-compose.yml` / `docker/entrypoint.sh` | — | ⭐ all-in-one 一体化镜像（sing-box+caddy+面板+systemd，→ `ghcr.io/6667084/ansgo`）|
@@ -101,7 +103,7 @@ docker compose pull && docker compose up -d             # 升级镜像
 
 ### 前置（第一阶段优化，详见 AGENTS.md §1）
 
-清理垃圾包、系统升级、`sysctl` 网络调优、`limits` 文件描述符、journald 限 50M；sing-box 与 caddy(naive) 就位（可由 `install.sh` 自动从 Releases 拉取）。
+手动部署前应先完成输入与远端资产预检；确认后再应用 `ansgo-limits`。它生成项目专属 `99-ansgo-tune.conf`、`60-ansgo.conf` 和三服务 `10-ansgo-limits.conf`，不会覆盖用户修改过的资源 drop-in。
 
 ```bash
 # 系统调优（幂等，install.sh 已自动执行）
@@ -220,7 +222,7 @@ cat > /etc/ansgo/panel.json <<EOF
 EOF
 chmod 600 /etc/ansgo/panel.json
 echo "⚠️ 随机端口：ss=${SS_PORT} anytls=${ANYTLS_PORT} socks=${SOCKS_PORT} naive=${NAIVE_PORT} panel=${PANEL_PORT}"
-# server_ip 留空时：面板普通启动会异步查询一次公网 IPv4 出口并自动回填（v1.5.37 待发布；已设不覆盖，失败不阻塞）。
+# server_ip 留空时：面板普通启动会异步查询一次公网 IPv4 出口并自动回填（v1.5.37；已设不覆盖，失败不阻塞）。
 # VPC/NAT 下公网出口≠入口，须手动填真实入口 IP（panel.json 的 server_ip 或安装参数 --server-ip）。
 ```
 
@@ -360,11 +362,11 @@ docker buildx build --builder ansgo-builder \
 
 ## 更新升级
 
-> ⭐ **v1.5.16 新增 SOCKS5 + 自定义网页标题**。已部署的服务器推荐用下方的 **「一键升级脚本」**，自动备份 + 识别部署形态 + 补全新功能所需配置字段。
+> v1.6.0 起跨版本升级统一使用 `upgrade.sh`：暂存全部组件并校验后切换，失败自动回滚。
 
 ### 一键升级脚本 ⭐（推荐，裸金属 / Docker 自动识别）
 
-`upgrade.sh` 专门为「已部署服务器的跨版本升级」设计，区别于 install.sh（全新部署）和 `ansgo-admin update`（仅更新单个二进制）。升级前自动备份，幂等可重复执行：
+`upgrade.sh` 自动识别形态。裸金属路径从目标 tag 暂存脚本与 release 资产并校验 SHA256，备份后切换和验证；Docker 路径实际切换指定镜像 tag、备份真实配置卷后重建验证。
 
 ```bash
 # 在已部署的服务器上执行（root），自动识别裸金属/Docker
@@ -374,20 +376,23 @@ curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.
 bash upgrade.sh --yes        # 跳过确认（自动化）
 bash upgrade.sh --docker     # 强制走 Docker 路径
 bash upgrade.sh --metal      # 强制走裸金属路径
+bash upgrade.sh --ver v1.6.0 # 指定目标版本
+bash upgrade.sh --auto       # 无新稳定版时直接退出，供 timer 使用
 bash upgrade.sh --help       # 查看用法
 ```
 
-**两种形态各自做了什么：**
+可用 `ANSGO_RAW_BASE`、`ANSGO_REL_BASE`、`ANSGO_RELEASE_API` 临时覆盖下载源，分别对应脚本、release 资产和 release 元数据。
 
 | | 裸金属（LXC / systemd 直管） | Docker（`ghcr.io/6667084/ansgo`） |
 |---|---|---|
-| **更新内容** | ① 更新 `ansgo-genconf` + `ansgo-admin` 脚本 ② 更新 `ansgo-panel` 二进制（md5 对比，相同则跳过）③ 补 `panel.json` 字段（`socks_port`/`svc_socks_enabled`/`panel_title`）④ 补 `secrets.env` 凭证 | 只拉新镜像重建容器（配置在 volume 里，不丢） |
-| **影响范围** | 仅重启 `ansgo-panel`（~2s），代理服务不动 | 重建容器，三服务短暂中断几秒 |
-| **自动备份** | `/etc/ansgo-backup-upgrade-{时间戳}/` | compose 目录 `ansgo-etc-vol-backup-{时间戳}.tgz` |
+| **更新内容** | 暂存、校验、迁移、切换并按活跃服务验证 | 指定 tag、备份真实卷、重建并验证 |
+| **自动备份** | `/etc/ansgo-backup/upgrade-*.tar.gz`（最多保留 2 份） | `/etc/ansgo-backup/upgrade-*.tar.gz` |
 
 > ⚠️ **SOCKS5 升级后默认不启用**（`svc_socks_enabled=false`）。启用方式：登录面板「服务管理」页点「安装」，或 SSH 执行 `ansgo-admin regen socks`（Docker：`docker exec ansgo ansgo-admin regen socks`）。
 
-**回滚**：裸金属从 `/etc/ansgo-backup-upgrade-{TS}/` 恢复（脚本结束会打印具体命令）；Docker 把 `docker-compose.yml` 的 image tag 改回 `:v1.5.15` 再 `docker compose up -d`。
+**回滚**：配置使用 `ansgo-admin restore /etc/ansgo-backup/upgrade-<备份名>.tar.gz`；Docker 版本将 compose 的 image tag 改回已验证版本后重建。
+
+**自动升级**：裸金属可通过面板「系统维护」页或 `systemctl enable --now ansgo-autoupgrade.timer` 启用。timer 默认关闭，每周低优先级检查稳定版，随机延迟；无更新不改动系统。
 
 完整升级方案对比（4 种方式）见根目录 [README.md「更新升级」](../README.md#-更新升级)。
 
@@ -468,7 +473,7 @@ bash install.sh --uninstall --purge
 3. **改前端 HTML 必须重新编译 Go 二进制**：`web/index.html` 经 `//go:embed` 编译进 ansgo-panel，改完 `go build` 重传，用户硬刷新浏览器。
 4. **前端 SPA"点击无反应"=JS 语法错误**：提取 `<script>` 用 `node --check` 查语法。
 5. **长任务用后台守护**：SSH 长连接易超时，`nohup ... > log 2>&1 &`。
-6. **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup-{ts}/`，失败 `ansgo-admin restore` 回滚。
+6. **改配置前必备份**：`ansgo-admin backup` → `/etc/ansgo-backup/`，失败 `ansgo-admin restore` 回滚。
 7. **Docker 一体化**（v1.4.0+）：`--docker` 用 all-in-one 镜像，容器内 systemd 作 PID 1，systemctl/journalctl/ansgo-admin 原生可用，面板 0 改动。需 `privileged` + `cgroup: host` + host 网络。LXC 低配（256MB）仍推荐裸金属。
 8. **响应式 CSS**：响应式 `@media` 块必须置于 `<style>` 末尾（所有基础规则之后），否则同特异性会被后面的基础规则覆盖。
 9. **彻底卸载**（v1.4.2+）：`install.sh --uninstall --purge` 自动检测 Docker/裸金属并彻底清理（含 docker 卷/镜像）；Docker 分支必须先删容器再删镜像。`bash -n` 只查语法不执行，改完脚本务必实际执行关键路径验证。
