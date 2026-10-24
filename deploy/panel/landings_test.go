@@ -335,28 +335,12 @@ func TestSanitizeProbeLogRedactsSensitiveFields(t *testing.T) {
 	}
 }
 
-// TestNormalizeLanding_AutoEnableWhenFieldsComplete 是 v1.5.35 的核心回归测试。
-// 复现用户报告的 bug：「新增第二个落地服务后，填了远端地址/端口/密钥但「启用远端」开关
-// 仍是关闭 → remote_enabled=false → genconf 不生成 outbound/route → 第二个落地走 direct
-// 泄漏中转 IP，且健康检测跳过远端协议探测」。修复：normalizeLanding 在远端字段齐全且
-// 校验通过时自动把 RemoteEnabled 置 true。
-func TestNormalizeLanding_AutoEnableWhenFieldsComplete(t *testing.T) {
-	// 场景：SS 远端字段齐全但 remote_enabled=false（用户报告的脏数据）
-	L := &LandingService{
-		ID: "2", Name: "AL-SGP", Enabled: true, Port: 33088,
-		RemoteEnabled: false, // ← 关键：用户填了字段但没开开关
-		RemoteType:    "ss", RemoteHost: "198.51.100.2", RemotePort: 19922,
-		RemoteMethod: "2022-blake3-aes-128-gcm", RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA==",
-	}
-	normalizeLanding(L)
-	if !L.RemoteEnabled {
-		t.Fatalf("远端字段齐全时应自动启用 remote_enabled，got %+v", L)
-	}
-	if L.RemoteType != "ss" {
-		t.Errorf("SS 类型应保留，got %q", L.RemoteType)
-	}
-	if L.RemoteUser != "" {
-		t.Errorf("SS 类型应清空 remote_user（避免字段串味），got %q", L.RemoteUser)
+// v1.6.0：自动启用只发生于 schema<2 的一次性迁移。
+func TestNormalizeLanding_CompleteFieldsStayDisabled(t *testing.T) {
+	l := &LandingService{RemoteType: "ss", RemoteHost: "your-domain.com", RemotePort: 8388, RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA=="}
+	normalizeLanding(l)
+	if l.RemoteEnabled {
+		t.Fatal("显式禁用不可被规范化覆盖")
 	}
 }
 
@@ -364,9 +348,9 @@ func TestNormalizeLanding_AutoEnableWhenFieldsComplete(t *testing.T) {
 // 避免误启用一个半成品配置。
 func TestNormalizeLanding_KeepsDisabledWhenFieldsIncomplete(t *testing.T) {
 	cases := []LandingService{
-		{RemoteEnabled: false, RemoteHost: "", RemotePort: 0, RemotePassword: ""}, // 全空
-		{RemoteEnabled: false, RemoteHost: "1.2.3.4", RemotePort: 0, RemotePassword: "x"}, // 缺 port
-		{RemoteEnabled: false, RemoteHost: "1.2.3.4", RemotePort: 8388, RemotePassword: ""}, // 缺 password
+		{RemoteEnabled: false, RemoteHost: "", RemotePort: 0, RemotePassword: ""},                            // 全空
+		{RemoteEnabled: false, RemoteHost: "1.2.3.4", RemotePort: 0, RemotePassword: "x"},                    // 缺 port
+		{RemoteEnabled: false, RemoteHost: "1.2.3.4", RemotePort: 8388, RemotePassword: ""},                  // 缺 password
 		{RemoteEnabled: false, RemoteHost: "", RemotePort: 8388, RemotePassword: "AAAAAAAAAAAAAAAAAAAAAA=="}, // 缺 host
 	}
 	for i, L := range cases {
@@ -378,20 +362,11 @@ func TestNormalizeLanding_KeepsDisabledWhenFieldsIncomplete(t *testing.T) {
 	}
 }
 
-// TestNormalizeLanding_SOCKSAutoEnable 验证 SOCKS5 远端字段齐全也能自动启用。
-func TestNormalizeLanding_SOCKSAutoEnable(t *testing.T) {
-	L := &LandingService{
-		ID: "3", Enabled: true, Port: 33090,
-		RemoteEnabled: false,
-		RemoteType:    "socks", RemoteHost: "198.51.100.7", RemotePort: 1080,
-		RemoteUser: "socksuser", RemotePassword: "sockspass",
-	}
-	normalizeLanding(L)
-	if !L.RemoteEnabled {
-		t.Fatalf("SOCKS5 远端字段齐全时应自动启用，got %+v", L)
-	}
-	if L.RemoteMethod != "" {
-		t.Errorf("SOCKS5 类型应清空 remote_method，got %q", L.RemoteMethod)
+func TestNormalizeLanding_SOCKSStayDisabled(t *testing.T) {
+	l := &LandingService{RemoteType: "socks", RemoteHost: "your-domain.com", RemotePort: 1080, RemoteUser: "user", RemotePassword: "pass"}
+	normalizeLanding(l)
+	if l.RemoteEnabled {
+		t.Fatal("SOCKS 显式禁用不可被覆盖")
 	}
 }
 
@@ -401,7 +376,7 @@ func TestNormalizeLanding_RespectsExplicitDisable(t *testing.T) {
 	L := &LandingService{
 		ID: "4", Enabled: true, Port: 33091,
 		RemoteEnabled: false,
-		RemoteType: "ss", RemoteHost: "", RemotePort: 0, RemotePassword: "",
+		RemoteType:    "ss", RemoteHost: "", RemotePort: 0, RemotePassword: "",
 	}
 	normalizeLanding(L)
 	if L.RemoteEnabled {

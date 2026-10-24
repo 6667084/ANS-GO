@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -8,13 +9,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -64,7 +64,12 @@ type Config struct {
 	//   每个落地服务 = 一个 anytls 入站 + 可选一个远端出站（SS/SOCKS5）。
 	//   旧的 group2_enabled/anytls2_port/naive2_port/ss_landing_* 由 upgrade.sh
 	//   迁移为 landings[0]，迁移后这些旧字段从 panel.json 移除。
-	Landings []LandingService `json:"landings"`
+	Landings       []LandingService `json:"landings"`
+	LandingsSchema int              `json:"landings_schema"`
+	LandingNextID  int              `json:"landing_next_id"`
+	TrustedProxy   string           `json:"trusted_proxy"`
+	AutoUpgrade    string           `json:"auto_upgrade"`
+	BackupKeep     int              `json:"backup_keep"`
 	// 证书来源：cert_mode="acme"(默认) 走 cert_dir/fullchain.pem+privkey.pem；
 	// "manual" 用 cert_fullchain/cert_privkey 两个绝对路径（与 acme 二选一）
 	CertMode          string `json:"cert_mode"`
@@ -86,36 +91,42 @@ type Config struct {
 	DBPath       string `json:"db_path"`
 }
 
-// LandingService 一个落地服务 = 一个 anytls 入站 + 可选一个远端出站（v1.5.26）。
-// 替代旧的单个硬编码 AnyTLS-2：现在可创建多个，每个有独立端口/凭证/远端配置。
-//
-//   - ID      : 内部标识（如 "1","2"），用作 sing-box tag 后缀（landing-in-<id>）
-//   - secrets.env key 前缀（LANDING_<id>_PASS/UUID）。新建时取 max+1，删除不回收。
-//   - Enabled : 是否启用该 anytls 入站（false 则 genconf 不生成对应 inbound）。
-//   - Remote* : 远端落地出口（独立开关）。RemoteEnabled=false 时该落地走 sing-box direct。
-//     RemoteType="ss"（shadowsocks）或 "socks"（socks5），字段按类型复用：
-//     SS 用 RemoteMethod + RemotePassword；SOCKS5 用 RemoteUser + RemotePassword。
-//     远端凭证明文存 panel.json（与旧 SSLandingPassword 一致，文件已 0600 root-only）。
+// 两套远端配置按值保存；兼容镜像只供旧调用方读取，不落盘。
+type RemoteSS struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Method   string `json:"method"`
+	Password string `json:"password"`
+}
+type RemoteSocks struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+}
 type LandingService struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`
-	Port    int    `json:"port"`
-
-	RemoteEnabled  bool   `json:"remote_enabled"`
-	RemoteType     string `json:"remote_type"`
-	RemoteHost     string `json:"remote_host"`
-	RemotePort     int    `json:"remote_port"`
-	RemoteMethod   string `json:"remote_method"`
-	RemotePassword string `json:"remote_password"`
-	RemoteUser     string `json:"remote_user"`
+	ID             string      `json:"id"`
+	Name           string      `json:"name"`
+	Enabled        bool        `json:"enabled"`
+	Port           int         `json:"port"`
+	RemoteEnabled  bool        `json:"remote_enabled"`
+	RemoteType     string      `json:"remote_type"`
+	RemoteSS       RemoteSS    `json:"remote_ss"`
+	RemoteSocks    RemoteSocks `json:"remote_socks"`
+	RemoteHost     string      `json:"-"`
+	RemotePort     int         `json:"-"`
+	RemoteMethod   string      `json:"-"`
+	RemotePassword string      `json:"-"`
+	RemoteUser     string      `json:"-"`
 }
 
 var (
-	cfg     Config
-	cfgMu   sync.RWMutex
-	db      *sql.DB
-	version = "1.5.37"
+	cfg            Config
+	cfgMu          sync.RWMutex
+	db             *sql.DB
+	version        = "1.6.0"
+	configChangeMu sync.Mutex
+	loginSlots     = make(chan struct{}, 4)
 )
 
 func loadConfig() (Config, error) {
@@ -126,6 +137,9 @@ func loadConfig() (Config, error) {
 	}
 	if err := json.Unmarshal(data, &c); err != nil {
 		return c, err
+	}
+	if c.BackupKeep < 1 {
+		c.BackupKeep = 5
 	}
 	// 默认值兜底
 	if c.PanelTitle == "" {
@@ -185,11 +199,7 @@ func saveConfig(c Config) error {
 		return err
 	}
 	data = append(data, '\n')
-	tmp := confPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, confPath)
+	return atomicWrite(confPath, data)
 }
 
 // certPaths 返回面板（及其他服务通过此函数同样口径读取）应使用的证书/私钥完整路径。
@@ -253,7 +263,7 @@ func nodeFragment(c Config, suffix string) string {
 func configGet() Config {
 	cfgMu.RLock()
 	defer cfgMu.RUnlock()
-	return cfg
+	return cloneConfig(cfg)
 }
 
 func configSet(c Config) error {
@@ -262,7 +272,7 @@ func configSet(c Config) error {
 	if err := saveConfig(c); err != nil {
 		return err
 	}
-	cfg = c
+	cfg = cloneConfig(c)
 	return nil
 }
 
@@ -287,6 +297,7 @@ func settingsApplyFrom(dst *Config, src Config, serverIPSubmitted bool) {
 	dst.PanelPort = src.PanelPort
 	dst.LoginLockThreshold = src.LoginLockThreshold
 	dst.LoginLockMinutes = src.LoginLockMinutes
+	dst.BackupKeep = src.BackupKeep
 	dst.DisguisePanel = src.DisguisePanel
 	dst.DisguiseNaive = src.DisguiseNaive
 	if serverIPSubmitted {
@@ -313,6 +324,8 @@ func configSetApplySettings(src Config, serverIPSubmitted bool) error {
 // 已保存则放弃）；base 为锁内最新 cfg 的深拷贝，只改 ServerIP 一个字段；
 // saveConfig tmp+rename 原子替换，失败时内存 cfg 不变。
 func configSetServerIPIfEmpty(ip string) (bool, error) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	cfgMu.Lock()
 	defer cfgMu.Unlock()
 	if strings.TrimSpace(cfg.ServerIP) != "" {
@@ -337,6 +350,11 @@ func initDB(path string) error {
 	if err != nil {
 		return err
 	}
+	d.SetMaxOpenConns(1)
+	if _, err = d.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		d.Close()
+		return err
+	}
 	db = d
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS sessions (
 		token TEXT PRIMARY KEY, ip TEXT, created INTEGER, expires INTEGER)`)
@@ -344,7 +362,18 @@ func initDB(path string) error {
 		return err
 	}
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS lockout (
-		ip TEXT PRIMARY KEY, fails INTEGER, locked_until INTEGER)`)
+		ip TEXT PRIMARY KEY, fails INTEGER, locked_until INTEGER, updated INTEGER NOT NULL DEFAULT 0)`)
+	if err != nil {
+		return err
+	}
+	// 旧会话库原地补列；只忽略明确的重复列错误。
+	if _, err := db.Exec("ALTER TABLE lockout ADD COLUMN updated INTEGER NOT NULL DEFAULT 0"); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		d.Close()
+		return err
+	}
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires);
+ CREATE INDEX IF NOT EXISTS lockout_expires ON lockout(locked_until);
+ CREATE INDEX IF NOT EXISTS lockout_updated ON lockout(updated);`)
 	return err
 }
 
@@ -386,42 +415,34 @@ func lockStatus(ip string) (fails int, lockedUntil int64) {
 }
 
 func lockRecordFail(ip string, threshold, lockMin int) (bool, error) {
-	// returns isLocked
 	now := time.Now().Unix()
-	var fails int
 	var until int64
-	err := db.QueryRow("SELECT fails FROM lockout WHERE ip=?", ip).Scan(&fails)
-	if err == sql.ErrNoRows {
-		fails = 0
-	} else if err != nil {
-		return false, err
+	initialUntil := int64(0)
+	if threshold <= 1 {
+		initialUntil = now + int64(lockMin)*60
 	}
-	fails++
-	locked := fails >= threshold
-	if locked {
-		until = now + int64(lockMin)*60
-	} else {
-		until = 0
-	}
-	_, err = db.Exec(`INSERT INTO lockout(ip,fails,locked_until) VALUES(?,?,?)
-		ON CONFLICT(ip) DO UPDATE SET fails=excluded.fails, locked_until=excluded.locked_until`,
-		ip, fails, until)
-	return locked, err
+	err := db.QueryRow(`INSERT INTO lockout(ip,fails,locked_until,updated) VALUES(?,1,?,?)
+ ON CONFLICT(ip) DO UPDATE SET
+ fails=CASE WHEN (locked_until>0 AND locked_until<=?) OR updated<? THEN 1 ELSE fails+1 END,
+ locked_until=CASE WHEN (CASE WHEN (locked_until>0 AND locked_until<=?) OR updated<? THEN 1 ELSE fails+1 END)>=? THEN ? ELSE 0 END,
+ updated=excluded.updated
+ RETURNING locked_until`, ip, initialUntil, now, now, now-3600, now, now-3600, threshold, now+int64(lockMin)*60).Scan(&until)
+	return until > now, err
 }
 
-func lockReset(ip string) { db.Exec("UPDATE lockout SET fails=0, locked_until=0 WHERE ip=?", ip) }
-
-// ===================== HTTP: 工具 =====================
+func lockReset(ip string) { db.Exec("DELETE FROM lockout WHERE ip=?", ip) }
 
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
+	if configGet().TrustedProxy == "true" {
+		if ip := net.ParseIP(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])); ip != nil {
+			return ip.String()
+		}
 	}
-	h := r.RemoteAddr
-	if i := strings.LastIndex(h, ":"); i > 0 {
-		h = h[:i]
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
 	}
-	return strings.Trim(h, "[]")
+	return r.RemoteAddr
 }
 
 func setSessionCookie(w http.ResponseWriter, tok string, hours int) {
@@ -460,12 +481,25 @@ func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // ===================== 自重启（改端口/路径/账号后）=====================
 
+var restartMu sync.Mutex
+var restartPending bool
+
 func scheduleSelfRestart(seconds int) {
-	cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep %d; systemctl restart ansgo-panel", seconds))
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		log.Printf("scheduleSelfRestart 失败: %v", err)
+	restartMu.Lock()
+	defer restartMu.Unlock()
+	if restartPending {
+		return
 	}
+	restartPending = true
+	go func() {
+		out, err := command("systemd-run", fmt.Sprintf("--unit=ansgo-panel-restart-%d", time.Now().UnixNano()), "--collect", "--timer-property=RemainAfterElapse=no", fmt.Sprintf("--on-active=%ds", seconds), "/bin/systemctl", "restart", "ansgo-panel").CombinedOutput()
+		if err != nil {
+			log.Printf("安排面板重启失败: %v: %s", err, out)
+			restartMu.Lock()
+			restartPending = false
+			restartMu.Unlock()
+		}
+	}()
 }
 
 // ===================== main =====================
@@ -487,13 +521,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("读取配置失败 %s: %v", confPath, err)
 	}
-	// v1.5.35: 启动时规范化所有落地服务（修历史「填了远端字段但 remote_enabled=false」
-	// 导致落地走 direct / 健康检测跳过远端协议探测的脏数据）。规范化后若变化则落盘。
+	// schema<2 时执行一次历史自动启用迁移，之后保留用户显式开关。
 	if migrateLandings(&c) {
 		if err := saveConfig(c); err != nil {
-			log.Printf("警告: 落地服务规范化写盘失败: %v（继续用内存中的修正值）", err)
+			log.Fatalf("落地服务迁移写盘失败: %v", err)
 		} else {
-			log.Println("已按 v1.5.35 规范化落地服务远端开关（远端字段齐全的落地自动启用远端出口）")
+			log.Println("落地服务已迁移至 schema 2")
 		}
 	}
 	cfg = c
@@ -501,6 +534,9 @@ func main() {
 		log.Fatalf("初始化数据库失败: %v", err)
 	}
 	defer db.Close()
+	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
+	defer stopCleanup()
+	go sessionCleanupLoop(cleanupCtx, db)
 
 	// 首次启动且未填写 server_ip 时，异步探测公网 IPv4 并原子持久化。
 	// 不阻塞启动（探测失败只记日志）；已有值（用户手动填写过）绝不探测覆盖。
@@ -518,6 +554,7 @@ func main() {
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 15 * time.Second,
+		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("ansgo-panel v%s 监听 https://%s%s (域名 %s)", version, addr, c.URLPath, c.Domain)

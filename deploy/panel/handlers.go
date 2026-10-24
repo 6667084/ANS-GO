@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -47,6 +48,8 @@ const (
 // 设为变量（而非常量）便于测试覆盖路径（生产运行时值不变），与 confPath/secretsPath 同口径。
 var acmeAccountConf = "/root/.acme.sh/account.conf"
 
+var healthSlots = make(chan struct{}, 2)
+
 func isDockerMode() bool {
 	if os.Getenv("ANSGO_DOCKER") == "1" {
 		return true
@@ -60,6 +63,7 @@ func isDockerMode() bool {
 // ===================== 路由根 =====================
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	c := configGet()
 	p := r.URL.Path
 
@@ -74,6 +78,16 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	rel := strings.TrimPrefix(p, c.URLPath)
 
+	if strings.HasPrefix(rel, "api/system/") {
+		handlers := map[string]http.HandlerFunc{
+			"info": systemInfoHandler, "check-update": systemCheckUpdateHandler, "upgrade": systemUpgradeHandler,
+			"upgrade-status": systemUpgradeStatusHandler, "auto-upgrade": systemAutoUpgradeHandler, "cleanup": systemCleanupHandler,
+		}
+		if h, ok := handlers[strings.TrimPrefix(rel, "api/system/")]; ok {
+			requireAuth(h)(w, r)
+			return
+		}
+	}
 	switch {
 	case rel == "" || rel == "/" || rel == "index.html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -164,6 +178,13 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 405, "方法不允许")
 		return
 	}
+	select {
+	case loginSlots <- struct{}{}:
+		defer func() { <-loginSlots }()
+	default:
+		jerr(w, 429, "登录请求过多，请稍后重试")
+		return
+	}
 	c := configGet()
 	ip := clientIP(r)
 
@@ -194,7 +215,11 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		jwrite(w, 200, map[string]any{"ok": true})
 		return
 	}
-	locked, _ := lockRecordFail(ip, c.LoginLockThreshold, c.LoginLockMinutes)
+	locked, lockErr := lockRecordFail(ip, c.LoginLockThreshold, c.LoginLockMinutes)
+	if lockErr != nil {
+		jerr(w, 500, "写入登录锁定失败")
+		return
+	}
 	if locked {
 		jerr(w, 429, fmt.Sprintf("连续错误达 %d 次，该 IP 已锁定 %d 分钟", c.LoginLockThreshold, c.LoginLockMinutes))
 		return
@@ -349,6 +374,8 @@ func bracketIPv6Host(host string) string {
 }
 
 func nodeHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	c := configGet()
 	sec := readSecrets()
 	uris := buildURIs(c, sec)
@@ -359,6 +386,7 @@ func nodeHandler(w http.ResponseWriter, r *http.Request) {
 	// v1.5.26: 落地服务列表（替代旧 anytls2 单条）
 	landings := []map[string]any{}
 	for _, L := range c.Landings {
+		normalizeLanding(&L)
 		pass, _, _ := readLandingSecrets(L.ID)
 		via := "direct"
 		if L.RemoteEnabled && L.RemoteHost != "" && L.RemotePort != 0 {
@@ -397,12 +425,17 @@ func nodeHandler(w http.ResponseWriter, r *http.Request) {
 // ===================== 服务控制 =====================
 
 func serviceHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
 	}
 	var b struct{ Target, Action string }
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		jerr(w, 400, "请求格式错误或请求体过大")
+		return
+	}
 	if b.Action != "start" && b.Action != "stop" && b.Action != "restart" {
 		jerr(w, 400, "action 必须为 start/stop/restart")
 		return
@@ -423,14 +456,14 @@ func serviceHandler(w http.ResponseWriter, r *http.Request) {
 				jerr(w, 500, "保存配置失败: "+err.Error())
 				return
 			}
-			exec.Command(binGenConf, "sing-box").Run()
+			command(binGenConf, "sing-box").Run()
 			needSB := c.SvcSSEnabled == "true" || c.SvcAnyTLSEnabled == "true" || c.SvcSocksEnabled == "true" || len(enabledLandings(c)) > 0
 			if needSB {
-				_ = exec.Command("systemctl", "enable", "sing-box").Run()
-				_ = exec.Command("systemctl", "restart", "sing-box").Run()
+				_ = command("systemctl", "enable", "sing-box").Run()
+				_ = command("systemctl", "restart", "sing-box").Run()
 			} else {
-				_ = exec.Command("systemctl", "stop", "sing-box").Run()
-				_ = exec.Command("systemctl", "disable", "sing-box").Run()
+				_ = command("systemctl", "stop", "sing-box").Run()
+				_ = command("systemctl", "disable", "sing-box").Run()
 			}
 			jwrite(w, 200, map[string]any{"ok": true, "target": b.Target, "action": b.Action})
 			return
@@ -466,6 +499,8 @@ func serviceHandler(w http.ResponseWriter, r *http.Request) {
 // ===================== 端口管理 =====================
 
 func portHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
@@ -474,7 +509,10 @@ func portHandler(w http.ResponseWriter, r *http.Request) {
 		Target string `json:"target"`
 		Port   int    `json:"port"`
 	}
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		jerr(w, 400, "请求格式错误或请求体过大")
+		return
+	}
 	if !validPort(b.Port) {
 		jerr(w, 400, "端口非法（1-65535）")
 		return
@@ -491,7 +529,7 @@ func portHandler(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 500, "保存配置失败: "+err.Error())
 			return
 		}
-		_ = exec.Command("sh", "-c", "nft add rule inet filter input tcp dport "+strconv.Itoa(b.Port)+" accept 2>/dev/null || true").Run()
+		_ = command("sh", "-c", "nft add rule inet filter input tcp dport "+strconv.Itoa(b.Port)+" accept 2>/dev/null || true").Run()
 		newURL := fmt.Sprintf("https://%s:%d%s", c.Domain, b.Port, c.URLPath)
 		scheduleSelfRestart(3)
 		jwrite(w, 200, map[string]any{"ok": true, "restart_in": 3, "new_url": newURL, "msg": fmt.Sprintf("面板将在 3 秒后重启到新端口 %d，请用新地址重新访问（会话已重置，需重新登录）。", b.Port)})
@@ -533,7 +571,7 @@ func applyProto(c Config, confTarget string) error {
 	if err := configSet(c); err != nil {
 		return err
 	}
-	if err := exec.Command(binGenConf, confTarget).Run(); err != nil {
+	if err := command(binGenConf, confTarget).Run(); err != nil {
 		return fmt.Errorf("生成配置失败: %w", err)
 	}
 	svc := "sing-box"
@@ -553,16 +591,15 @@ func applyProto(c Config, confTarget string) error {
 // 「反代正常但代理不能用」——极具迷惑性）。
 // confTarget: "caddy" | "sing-box"。返回 (active状态, 错误)。
 func genconfRestartVerify(confTarget string) (active string, err error) {
-	svc := confTarget
-	if confTarget == "caddy" {
-		svc = "caddy"
-	}
-	out, gerr := exec.Command(binGenConf, confTarget).CombinedOutput()
+	out, gerr := command(binGenConf, confTarget).CombinedOutput()
 	if gerr != nil {
-		// genconf 失败时它内部已回滚 Caddyfile，服务继续用旧配置——不重启。
-		return "", fmt.Errorf("生成配置失败（已回滚旧配置，服务未重启）: %s", strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("生成配置失败（正式配置未替换，服务未重启）: %w: %s", gerr, strings.TrimSpace(string(out)))
 	}
-	if rerr := exec.Command("systemctl", "restart", svc).Run(); rerr != nil {
+	return restartVerify(confTarget)
+}
+
+func restartVerify(svc string) (string, error) {
+	if rerr := command("systemctl", "restart", svc).Run(); rerr != nil {
 		return "", fmt.Errorf("重启 %s 失败: %w", svc, rerr)
 	}
 	// 验证：等待最多 4 秒确认服务真的 active（非 deactivating/failed）。
@@ -581,6 +618,8 @@ func genconfRestartVerify(confTarget string) (active string, err error) {
 // ===================== 密钥管理（委托 ansgo-admin）=====================
 
 func regenHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
@@ -588,7 +627,10 @@ func regenHandler(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Target string `json:"target"`
 	}
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		jerr(w, 400, "请求格式错误或请求体过大")
+		return
+	}
 	if b.Target != "ss" && b.Target != "anytls" && b.Target != "socks" && b.Target != "naive" && b.Target != "g2" {
 		jerr(w, 400, "target 必须为 ss/anytls/socks/naive/g2")
 		return
@@ -597,7 +639,7 @@ func regenHandler(w http.ResponseWriter, r *http.Request) {
 	if b.Target == "g2" {
 		adminArgs = []string{"regen2"}
 	}
-	out, err := exec.Command(binAdmin, adminArgs...).CombinedOutput()
+	out, err := command(binAdmin, adminArgs...).CombinedOutput()
 	if err != nil {
 		jerr(w, 500, "regen 失败: "+string(out))
 		return
@@ -650,11 +692,7 @@ func setSecretLocked(key, value string) error {
 	if !strings.HasSuffix(out, "\n") {
 		out += "\n"
 	}
-	tmp := secretsPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(out), 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, secretsPath)
+	return atomicWrite(secretsPath, []byte(out))
 }
 
 // setLandingPassword 保存单个落地服务的 AnyTLS 密码。
@@ -681,27 +719,6 @@ func cloneConfig(c Config) Config {
 	return out
 }
 
-func backupSecretsFile() ([]byte, bool) {
-	data, err := os.ReadFile(secretsPath)
-	if err != nil {
-		return nil, false
-	}
-	return append([]byte{}, data...), true
-}
-
-func restoreSecretsFile(data []byte, existed bool) {
-	if existed {
-		_ = os.WriteFile(secretsPath, data, 0600)
-		return
-	}
-	_ = os.Remove(secretsPath)
-}
-
-func restoreLandingApply(original Config, secData []byte, secExisted bool) {
-	_ = configSet(original)
-	restoreSecretsFile(secData, secExisted)
-}
-
 // keyHandler 手动设置各协议密钥（与 regen 的随机生成互补）。
 // POST {target, method?, key?, pass?, user?}
 //   - ss      : 写 SS_METHOD + SS_KEY（校验 SS2022 密钥长度）
@@ -711,12 +728,17 @@ func restoreLandingApply(original Config, secData []byte, secExisted bool) {
 //
 // 落地服务密钥（原 anytls2）已移到 api/landings/regen（v1.5.26）。
 func keyHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
 	}
 	var b struct{ Target, Method, Key, Pass, User string }
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		jerr(w, 400, "请求格式错误或请求体过大")
+		return
+	}
 	confTarget := ""
 	switch b.Target {
 	case "ss":
@@ -899,11 +921,7 @@ func writeAcmeAccountConf(c Config) error {
 		}
 	}
 	content := strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
-	tmp := acmeAccountConf + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, acmeAccountConf)
+	return atomicWrite(acmeAccountConf, []byte(content))
 }
 
 // runCertIssue 调用 ansgo-cert-issue.sh 签发证书（同步阻塞，约 1-3 分钟）。
@@ -913,7 +931,7 @@ func runCertIssue(c Config) (string, error) {
 	// 先把凭证写进 account.conf，保证续期 cron 可用（issue 流程也会通过环境读到）。
 	_ = writeAcmeAccountConf(c)
 
-	cmd := exec.Command("bash", binCertIssue)
+	cmd := command("bash", binCertIssue)
 	cmd.Env = append(os.Environ(),
 		"DOMAIN="+c.Domain,
 		"EMAIL="+acmeEmailOrDefault(c),
@@ -931,6 +949,8 @@ func certHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func certRenewHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
@@ -942,9 +962,13 @@ func certRenewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// v1.5.27：续期前确保 account.conf 含最新凭证（manual→acme 切换后续期也能读到）。
 	_ = writeAcmeAccountConf(c)
-	out, err := exec.Command("sh", "-c", binAcme+" --renew -d "+c.Domain+" --ecc --force 2>&1; "+binGenConf+" all 2>/dev/null; /usr/local/bin/ansgo-cert-reload").CombinedOutput()
+	renew := command(binAcme, "--renew", "-d", c.Domain, "--ecc", "--force")
+	out, err := renew.CombinedOutput()
+	if err == nil {
+		err = reloadProxyServices()
+	}
 	if err != nil {
-		jwrite(w, 500, map[string]any{"ok": false, "log": string(out)})
+		jwrite(w, 500, map[string]any{"ok": false, "log": string(out), "error": err.Error()})
 		return
 	}
 	jwrite(w, 200, map[string]any{"ok": true, "log": string(out), "cert": certInfoFull(c)})
@@ -953,6 +977,8 @@ func certRenewHandler(w http.ResponseWriter, r *http.Request) {
 // certReloadHandler 手动证书模式下，用户在服务器替换证书文件后点此触发三服务重新读取。
 // 不跑 acme.sh，直接调 ansgo-cert-reload（restart caddy/sing-box/ansgo-panel）。
 func certReloadHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
@@ -977,22 +1003,24 @@ func certReloadHandler(w http.ResponseWriter, r *http.Request) {
 			jerr(w, 400, "尚未发现同步源 "+srcKey+"。请在证书管理页复制「系统自动任务一键安装」或「宝塔计划任务脚本」到宿主机执行后再点此按钮。")
 			return
 		}
-		syncOut, _ := exec.Command("/bin/bash", binManualCertSync).CombinedOutput()
+		syncOut, syncErr := command("/bin/bash", binManualCertSync).CombinedOutput()
+		if syncErr != nil {
+			if exit, ok := syncErr.(*exec.ExitError); !ok || exit.ExitCode() != 10 {
+				jerr(w, 500, "同步证书失败: "+string(syncOut))
+				return
+			}
+		}
 		log.Printf("cert reload (docker manual): ansgo-sync-manual-cert: %s", string(syncOut))
 	}
-	// 校验当前证书文件可读（避免路径错误导致三服务全部起不来）
 	fullchain, privkey := certPaths(c)
-	if _, err := os.ReadFile(fullchain); err != nil {
-		jerr(w, 400, "证书文件无法读取: "+err.Error())
+	if _, err := tls.LoadX509KeyPair(fullchain, privkey); err != nil {
+		jerr(w, 400, "证书/私钥无效或不匹配: "+err.Error())
 		return
 	}
-	if _, err := os.ReadFile(privkey); err != nil {
-		jerr(w, 400, "私钥文件无法读取: "+err.Error())
+	if err := reloadProxyServices(); err != nil {
+		jerr(w, 500, err.Error())
 		return
 	}
-	go func() {
-		_ = exec.Command("/usr/local/bin/ansgo-cert-reload").Run()
-	}()
 	newURL := fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath)
 	scheduleSelfRestart(3)
 	jwrite(w, 200, map[string]any{
@@ -1017,7 +1045,10 @@ func certReloadHandler(w http.ResponseWriter, r *http.Request) {
 //   - 切到 acme 或更新了 Dynu 凭证时，把凭证写进 acme.sh account.conf（供续期 cron 使用）。
 //   - 保存后重生成配置 + 重启 caddy/sing-box/面板。
 func certConfigHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	c := configGet()
+	original := cloneConfig(c)
 	if r.Method == "GET" {
 		runtimeFullchain, runtimePrivkey := certPaths(c)
 		jwrite(w, 200, map[string]any{
@@ -1052,7 +1083,10 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 		DynuSecret    *string `json:"dynu_secret"`
 		AcmeEmail     *string `json:"acme_email"`
 	}
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		jerr(w, 400, "请求格式错误或请求体过大")
+		return
+	}
 	dynuChanged := false
 	if b.Mode != nil {
 		m := strings.TrimSpace(*b.Mode)
@@ -1125,10 +1159,25 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := configSet(c); err != nil {
-		jerr(w, 500, "保存失败: "+err.Error())
+	tlsChanged := c.CertMode != original.CertMode || c.CertFullchain != original.CertFullchain || c.CertPrivkey != original.CertPrivkey
+	if tlsChanged {
+		cert, key := certPaths(c)
+		if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
+			jerr(w, 400, "目标证书尚未就绪或私钥不匹配: "+err.Error())
+			return
+		}
+	}
+	var saveErr error
+	if tlsChanged {
+		saveErr = applyConfigTransaction(c, func() error { return nil }, reloadProxyServices, []string{"/etc/sing-box/config.json", "/etc/caddy/Caddyfile"})
+	} else {
+		saveErr = configSet(c)
+	}
+	if saveErr != nil {
+		jerr(w, 500, "证书设置应用失败: "+saveErr.Error())
 		return
 	}
+
 	// v1.5.27：acme 模式且凭证有变更 → 同步写进 account.conf，确保续期 cron 可用。
 	if c.CertMode == "acme" && dynuChanged && dynuConfigured(c) {
 		if err := writeAcmeAccountConf(c); err != nil {
@@ -1136,13 +1185,11 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("certConfig: 写 account.conf 警告: %v", err)
 		}
 	}
-	// 证书路径/模式变化影响 caddy + sing-box + 面板自身，全部重生成并重启。
-	// 面板自身因 TLS 证书也变，需要 scheduleSelfRestart 并提示前端 overlay 重新登录。
-	go func() {
-		_ = exec.Command(binGenConf, "all").Run()
-		_ = exec.Command("systemctl", "restart", "caddy").Run()
-		_ = exec.Command("systemctl", "restart", "sing-box").Run()
-	}()
+	if !tlsChanged {
+		jwrite(w, 200, map[string]any{"ok": true, "cert": certInfoFull(c)})
+		return
+	}
+
 	newURL := fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath)
 	scheduleSelfRestart(3)
 	jwrite(w, 200, map[string]any{
@@ -1158,6 +1205,8 @@ func certConfigHandler(w http.ResponseWriter, r *http.Request) {
 //
 // 同步阻塞执行（约 1-3 分钟 DNS-01 签发），失败返回 acme.sh 日志供前端展示。
 func certIssueHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
@@ -1187,7 +1236,10 @@ func certIssueHandler(w http.ResponseWriter, r *http.Request) {
 // ===================== 面板设置 =====================
 
 func settingsHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	c := configGet()
+	originalPanelPort := c.PanelPort
 	if r.Method == "GET" {
 		ip, hint := resolveServerIP(c)
 		jwrite(w, 200, map[string]any{
@@ -1208,6 +1260,7 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 			"caddy_enable":   c.CaddyEnable,
 			"cert_mode":      c.CertMode,
 			"cert_days_left": certInfoFull(c)["days_left"],
+			"backup_keep":    backupKeep(c),
 		})
 		return
 	}
@@ -1223,8 +1276,19 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 		DisguisePanel      *string `json:"disguise_panel"`
 		DisguiseNaive      *string `json:"disguise_naive"`
 		ServerIP           *string `json:"server_ip"`
+		BackupKeep         *int    `json:"backup_keep"`
 	}
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		jerr(w, 400, "请求格式错误或请求体过大")
+		return
+	}
+	if b.BackupKeep != nil {
+		if *b.BackupKeep < 1 || *b.BackupKeep > 30 {
+			jerr(w, 400, "backup_keep 必须为 1-30")
+			return
+		}
+		c.BackupKeep = *b.BackupKeep
+	}
 	needRestart := false
 	needCaddyReload := false
 	// v1.5.21 修复：仅在 url_path 真正变化时才触发重启。
@@ -1264,7 +1328,10 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.PanelPort = *b.PanelPort
-		_ = exec.Command("sh", "-c", "nft add rule inet filter input tcp dport "+strconv.Itoa(c.PanelPort)+" accept 2>/dev/null || true").Run()
+		if msg := portConflicts(c); msg != "" {
+			jerr(w, 400, "端口冲突: "+msg)
+			return
+		}
 		needRestart = true
 	}
 	if b.LoginLockThreshold != nil {
@@ -1322,11 +1389,14 @@ func settingsHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, "保存失败: "+err.Error())
 		return
 	}
+	if b.PanelPort != nil && c.PanelPort != originalPanelPort {
+		_ = command("sh", "-c", "nft add rule inet filter input tcp dport "+strconv.Itoa(c.PanelPort)+" accept 2>/dev/null || true").Run()
+	}
 	if needCaddyReload {
-		go func() {
-			_ = exec.Command(binGenConf, "caddy").Run()
-			_ = exec.Command("systemctl", "restart", "caddy").Run()
-		}()
+		if _, err := genconfRestartVerify("caddy"); err != nil {
+			jerr(w, 500, err.Error())
+			return
+		}
 	}
 	if needRestart {
 		newURL := fmt.Sprintf("https://%s:%d%s", c.Domain, c.PanelPort, c.URLPath)
@@ -1496,7 +1566,13 @@ func logsHandler(w http.ResponseWriter, r *http.Request) {
 	if n == "" {
 		n = "200"
 	}
-	out, err := exec.Command("journalctl", "-u", svc, "-n", n, "--no-pager", "--output=cat").CombinedOutput()
+	count, parseErr := strconv.Atoi(n)
+	if parseErr != nil || count < 1 || count > 1000 {
+		jerr(w, 400, "n 必须为 1-1000 的整数")
+		return
+	}
+	n = strconv.Itoa(count)
+	out, err := command("journalctl", "-u", svc, "-n", n, "--no-pager", "--output=cat").CombinedOutput()
 	if err != nil && len(out) == 0 {
 		jerr(w, 500, "读取日志失败")
 		return
@@ -1507,6 +1583,7 @@ func logsHandler(w http.ResponseWriter, r *http.Request) {
 // ===================== 服务健康检测（v1.5.12）=====================
 
 func probeLandingRemote(L LandingService, timeout time.Duration) (string, int64) {
+	normalizeLanding(&L)
 	if !L.RemoteEnabled {
 		return "skip", 0
 	}
@@ -1557,7 +1634,7 @@ func currentTimeDiag() *timeDiag {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "timedatectl", "show", "-p", "Timezone", "-p", "NTPSynchronized", "--value").Output()
+	out, err := commandContext(ctx, "timedatectl", "show", "-p", "Timezone", "-p", "NTPSynchronized", "--value").Output()
 	if err != nil {
 		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
 			d.NTPSynchronized = "host"
@@ -1587,6 +1664,7 @@ func formatUTCOffset(offset int) string {
 }
 
 func probeLandingRemoteDetail(L LandingService, timeout time.Duration) landingRemoteProbeDetail {
+	normalizeLanding(&L)
 	p := landingRemoteProbeDetail{Status: "skip", Protocol: "tcp"}
 	if !L.RemoteEnabled {
 		return p
@@ -1616,6 +1694,7 @@ func probeLandingRemoteDetail(L LandingService, timeout time.Duration) landingRe
 			return p
 		}
 		L.RemotePassword = normKey
+		L.RemoteSS.Password = normKey
 	}
 	start := time.Now()
 	tcpTimeout := timeout / 3
@@ -1658,6 +1737,7 @@ func probeLandingRemoteDetail(L LandingService, timeout time.Duration) landingRe
 }
 
 func probeRemoteShadowsocksViaSingBox(L LandingService, timeout time.Duration) (bool, int64, string) {
+	normalizeLanding(&L)
 	if strings.TrimSpace(L.RemoteMethod) == "" {
 		L.RemoteMethod = "2022-blake3-aes-128-gcm"
 	}
@@ -1701,8 +1781,8 @@ func probeRemoteShadowsocksViaSingBox(L LandingService, timeout time.Duration) (
 	_ = tmp.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, singBox, "run", "-c", cfgPath)
-	var out strings.Builder
+	cmd := commandContext(ctx, singBox, "run", "-c", cfgPath)
+	var out boundedBuffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Start(); err != nil {
@@ -1725,11 +1805,13 @@ func probeRemoteShadowsocksViaSingBox(L LandingService, timeout time.Duration) (
 		return false, 0, "sing-box 临时检测客户端未能监听本地端口；日志：" + sanitizeProbeLog(out.String())
 	}
 	proxyURL, _ := url.Parse("http://127.0.0.1:" + strconv.Itoa(port))
-	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	tr := &http.Transport{Proxy: http.ProxyURL(proxyURL), DisableKeepAlives: true}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr}
 	return probeHTTPThroughClient(ctx, client, timeout, &out)
 }
 
-func probeHTTPThroughClient(ctx context.Context, client *http.Client, timeout time.Duration, logs *strings.Builder) (bool, int64, string) {
+func probeHTTPThroughClient(ctx context.Context, client *http.Client, timeout time.Duration, logs *boundedBuffer) (bool, int64, string) {
 	probeURLs := []string{
 		"http://cp.cloudflare.com/generate_204",
 		"https://www.cloudflare.com/cdn-cgi/trace",
@@ -1754,14 +1836,19 @@ func probeHTTPThroughClient(ctx context.Context, client *http.Client, timeout ti
 			continue
 		}
 		resp, err := client.Do(req)
-		cancel()
 		ms := time.Since(startAll).Milliseconds()
 		if err != nil {
+			cancel()
 			lastErr = err.Error()
 			continue
 		}
-		io.Copy(io.Discard, resp.Body)
+		_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
+		cancel()
+		if readErr != nil {
+			lastErr = readErr.Error()
+			continue
+		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 			return true, ms, ""
 		}
@@ -1855,6 +1942,13 @@ func waitTCP(host string, port int, timeout time.Duration) bool {
 // POST {target: ss|anytls|naive|panel|caddy|group2}
 // 返回 {ok, target, enabled, active, port, port_listening, tcp_connect, tcp_ms, summary}
 func healthHandler(w http.ResponseWriter, r *http.Request) {
+	select {
+	case healthSlots <- struct{}{}:
+		defer func() { <-healthSlots }()
+	default:
+		jerr(w, 429, "健康检测进行中，请稍后重试")
+		return
+	}
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
@@ -1862,7 +1956,10 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Target string `json:"target"`
 	}
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		jerr(w, 400, "请求格式错误或请求体过大")
+		return
+	}
 	c := configGet()
 	type svcInfo struct {
 		unit, port string
@@ -1921,7 +2018,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	active := svcActive(info.unit)
 	portListening := "no"
 	if port := info.port; port != "" && port != "0" {
-		out, _ := exec.Command("sh", "-c", "ss -tln 2>/dev/null | awk 'NR>1{print $4}'").Output()
+		out, _ := command("sh", "-c", "ss -tln 2>/dev/null | awk 'NR>1{print $4}'").Output()
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.HasSuffix(strings.TrimSpace(line), ":"+port) {
 				portListening = "yes"
@@ -1977,12 +2074,17 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 // 动作：重新从 secrets.env 生成对应服务配置（caddy/sing-box/all）+ 重启 + 验证 active。
 // POST {target: caddy|sing-box|all}  默认 all。
 func repairHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
 	}
 	var b struct{ Target string }
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		jerr(w, 400, "请求格式错误或请求体过大")
+		return
+	}
 	target := strings.TrimSpace(b.Target)
 	if target == "" {
 		target = "all"
@@ -2028,7 +2130,7 @@ func svcOfLog(t string) string {
 }
 
 func systemctl(action, svc string) error {
-	return exec.Command("systemctl", action, svc).Run()
+	return command("systemctl", action, svc).Run()
 }
 
 // svcActive 返回 systemctl is-active 的真实状态文本。
@@ -2038,7 +2140,7 @@ func systemctl(action, svc string) error {
 // "failed" 全部归为 unknown，丢失诊断信息、误导排查（v1.5.14 修复）。
 // 仅当 stdout 为空（极少见，如 unit 不存在）才回退 unknown。
 func svcActive(svc string) string {
-	out, err := exec.Command("systemctl", "is-active", svc).Output()
+	out, err := command("systemctl", "is-active", svc).Output()
 	s := strings.TrimSpace(string(out))
 	if s == "" {
 		if err != nil {
@@ -2390,6 +2492,7 @@ func certInfoFull(c Config) map[string]any {
 
 // landingToMap 把一个 LandingService 转成 API 响应用的 map（含从 secrets 读出的 password/uuid）。
 func landingToMap(L LandingService) map[string]any {
+	normalizeLanding(&L)
 	pass, uuid, found := readLandingSecrets(L.ID)
 	// v1.5.35: remote_via 给前端一个明确的「出口方式」描述，避免「填了字段但开关没开」时
 	// 卡片看起来配置齐全实则走 direct 的迷惑。
@@ -2411,6 +2514,8 @@ func landingToMap(L LandingService) map[string]any {
 		"uuid":            uuid,
 		"remote_enabled":  L.RemoteEnabled,
 		"remote_type":     L.RemoteType,
+		"remote_ss":       L.RemoteSS,
+		"remote_socks":    L.RemoteSocks,
 		"remote_host":     L.RemoteHost,
 		"remote_port":     L.RemotePort,
 		"remote_method":   L.RemoteMethod,
@@ -2418,432 +2523,6 @@ func landingToMap(L LandingService) map[string]any {
 		"remote_user":     L.RemoteUser,
 		"remote_via":      remoteVia,
 	}
-}
-
-// validateLandingRemote 校验落地服务的远端出口配置（启用时）。
-// 返回错误描述，空串表示通过。
-func validateLandingRemote(L *LandingService) string {
-	if !L.RemoteEnabled {
-		return ""
-	}
-	L.RemoteHost = strings.TrimSpace(L.RemoteHost)
-	L.RemoteType = strings.ToLower(strings.TrimSpace(L.RemoteType))
-	if L.RemoteType == "" {
-		L.RemoteType = "ss"
-	}
-	if strings.TrimSpace(L.RemoteMethod) == "" {
-		L.RemoteMethod = "2022-blake3-aes-128-gcm"
-	}
-	if L.RemoteHost == "" || L.RemotePort == 0 {
-		return "启用远端落地需填写 host/port"
-	}
-	if L.RemoteType == "socks" {
-		if L.RemoteUser == "" || L.RemotePassword == "" {
-			return "SOCKS5 远端需填写用户名和密码"
-		}
-	} else { // ss（默认）
-		if L.RemotePassword == "" {
-			return "Shadowsocks 远端需填写密钥"
-		}
-		normKey, msg := normalizeSS2022Key(L.RemoteMethod, L.RemotePassword)
-		if msg != "" {
-			return msg
-		}
-		L.RemotePassword = normKey
-	}
-	return ""
-}
-
-// normalizeLanding 落地服务规范化（v1.5.35）。
-// 解决「新增第二个落地服务后不走远端出口」的根因：用户在面板填好了远端 host/port/密钥，
-// 但「启用远端」开关仍是「关闭」，于是 remote_enabled=false → genconf 不生成 outbound/route →
-// 该落地走 direct（泄漏中转 IP），且健康检测因 RemoteEnabled=false 直接 skip 远端协议探测。
-// 修复策略（防御性自动启用）：远端字段齐全（host + port + 凭证）且能通过校验时，自动把
-// RemoteEnabled 置 true——这样既修旧部署的脏数据，也避免新部署重复踩同一坑。
-// 同时按 remote_type 清理无关字段（ss 不留 remote_user；socks 不留 remote_method），
-// 避免前端类型来回切换导致字段串味。
-func normalizeLanding(L *LandingService) {
-	L.RemoteHost = strings.TrimSpace(L.RemoteHost)
-	L.RemoteType = strings.ToLower(strings.TrimSpace(L.RemoteType))
-	if L.RemoteType == "" {
-		L.RemoteType = "ss"
-	}
-	if strings.TrimSpace(L.RemoteMethod) == "" {
-		L.RemoteMethod = "2022-blake3-aes-128-gcm"
-	}
-	// 远端字段齐全且校验通过 → 自动启用（修历史「填了字段但开关没开」的脏数据）
-	if !L.RemoteEnabled && L.RemoteHost != "" && L.RemotePort > 0 && L.RemotePassword != "" {
-		if L.RemoteType != "socks" || L.RemoteUser != "" {
-			if validateLandingRemote(L) == "" {
-				L.RemoteEnabled = true
-			}
-		}
-	}
-	// 按类型清理无关字段（避免 UI 来回切换 SS/SOCKS5 时残留）
-	if L.RemoteType == "socks" {
-		L.RemoteMethod = ""
-	} else {
-		L.RemoteType = "ss"
-		L.RemoteUser = ""
-	}
-}
-
-// migrateLandings 启动时对每个落地服务跑一遍 normalizeLanding，返回是否有字段变化。
-// 用于一次性修复历史「远端字段齐全但 remote_enabled=false」的脏数据（v1.5.35）。
-func migrateLandings(c *Config) bool {
-	if c == nil || len(c.Landings) == 0 {
-		return false
-	}
-	changed := false
-	for i := range c.Landings {
-		before := c.Landings[i]
-		nl := before
-		normalizeLanding(&nl)
-		if nl != before {
-			c.Landings[i] = nl
-			changed = true
-		}
-	}
-	return changed
-}
-
-// landingsHandler GET 返回列表；POST 新建落地服务。
-//
-//	GET  -> {landings: [...]}
-//	POST -> {name, port, enabled, remote_*} 创建（分配新 id + 生成凭证）
-func landingsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		c := configGet()
-		out := []map[string]any{}
-		for _, L := range c.Landings {
-			out = append(out, landingToMap(L))
-		}
-		jwrite(w, 200, map[string]any{"landings": out})
-		return
-	}
-	if r.Method != "POST" {
-		jerr(w, 405, "方法不允许")
-		return
-	}
-	// POST: 新建
-	var b struct {
-		Name           string `json:"name"`
-		Port           int    `json:"port"`
-		Enabled        *bool  `json:"enabled"`
-		RemoteEnabled  *bool  `json:"remote_enabled"`
-		RemoteType     string `json:"remote_type"`
-		RemoteHost     string `json:"remote_host"`
-		RemotePort     int    `json:"remote_port"`
-		RemoteMethod   string `json:"remote_method"`
-		RemotePassword string `json:"remote_password"`
-		RemoteUser     string `json:"remote_user"`
-	}
-	json.NewDecoder(r.Body).Decode(&b)
-	name := strings.TrimSpace(b.Name)
-	if name == "" {
-		jerr(w, 400, "名称不能为空")
-		return
-	}
-	if b.Port < 1 || b.Port > 65535 {
-		jerr(w, 400, "端口必须在 1-65535 范围")
-		return
-	}
-	// 分配新 id（现有最大 id + 1）
-	c := configGet()
-	maxID := 0
-	for _, L := range c.Landings {
-		if n, err := strconv.Atoi(L.ID); err == nil && n > maxID {
-			maxID = n
-		}
-	}
-	newID := strconv.Itoa(maxID + 1)
-	L := LandingService{
-		ID:             newID,
-		Name:           name,
-		Enabled:        true, // 新建默认启用
-		Port:           b.Port,
-		RemoteType:     b.RemoteType,
-		RemoteHost:     strings.TrimSpace(b.RemoteHost),
-		RemotePort:     b.RemotePort,
-		RemoteMethod:   b.RemoteMethod,
-		RemotePassword: b.RemotePassword,
-		RemoteUser:     strings.TrimSpace(b.RemoteUser),
-	}
-	if b.Enabled != nil {
-		L.Enabled = *b.Enabled
-	}
-	if b.RemoteEnabled != nil {
-		L.RemoteEnabled = *b.RemoteEnabled
-	}
-	if L.RemoteMethod == "" {
-		L.RemoteMethod = "2022-blake3-aes-128-gcm"
-	}
-	if L.RemoteType == "" {
-		L.RemoteType = "ss"
-	}
-	// 端口冲突预检（用新配置副本）
-	trial := c
-	trial.Landings = append(append([]LandingService{}, c.Landings...), L)
-	if msg := portConflicts(trial); msg != "" {
-		jerr(w, 400, "端口冲突: "+msg)
-		return
-	}
-	// v1.5.35: 规范化 + 防御性自动启用远端（与 update 路径一致）
-	normalizeLanding(&L)
-	// 远端校验（启用时）
-	if msg := validateLandingRemote(&L); msg != "" {
-		jerr(w, 400, msg)
-		return
-	}
-	// 生成凭证（调 ansgo-admin regen-landing <id>）
-	original := cloneConfig(c)
-	secData, secExisted := backupSecretsFile()
-	out, err := exec.Command(binAdmin, "regen-landing", newID).CombinedOutput()
-	if err != nil {
-		restoreSecretsFile(secData, secExisted)
-		jerr(w, 500, "生成落地凭证失败: "+string(out))
-		return
-	}
-	c.Landings = append(c.Landings, L)
-	if err := configSet(c); err != nil {
-		restoreLandingApply(original, secData, secExisted)
-		jerr(w, 500, "保存失败: "+err.Error())
-		return
-	}
-	// 同步 genconf + restart + verify（v1.5.24 模式）
-	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
-		restoreLandingApply(original, secData, secExisted)
-		jwrite(w, 500, map[string]any{
-			"ok":      false,
-			"error":   gerr.Error(),
-			"hint":    "落地服务创建未应用成功，已回滚 panel.json 与落地凭证；查看 journalctl -u sing-box",
-			"active":  active,
-			"landing": landingToMap(L),
-		})
-		return
-	}
-	jwrite(w, 200, map[string]any{"ok": true, "landing": landingToMap(L)})
-}
-
-// landingUpdateHandler 修改某个落地服务（全字段）。
-// POST {id, name?, port?, enabled?, remote_*?}
-func landingUpdateHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		jerr(w, 405, "方法不允许")
-		return
-	}
-	var b struct {
-		ID             string  `json:"id"`
-		Name           *string `json:"name"`
-		Port           *int    `json:"port"`
-		Enabled        *bool   `json:"enabled"`
-		RemoteEnabled  *bool   `json:"remote_enabled"`
-		RemoteType     *string `json:"remote_type"`
-		RemoteHost     *string `json:"remote_host"`
-		RemotePort     *int    `json:"remote_port"`
-		RemoteMethod   *string `json:"remote_method"`
-		RemotePassword *string `json:"remote_password"`
-		RemoteUser     *string `json:"remote_user"`
-		Password       *string `json:"password"`
-	}
-
-	json.NewDecoder(r.Body).Decode(&b)
-	c := configGet()
-	idx := -1
-	for i := range c.Landings {
-		if c.Landings[i].ID == b.ID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		jerr(w, 404, "未找到落地服务: "+b.ID)
-		return
-	}
-	original := cloneConfig(c)
-	secData, secExisted := backupSecretsFile()
-	prev := c.Landings[idx] // 备份用于冲突回滚
-	// 应用可选字段
-	if b.Name != nil {
-		if name := strings.TrimSpace(*b.Name); name != "" {
-			c.Landings[idx].Name = name
-		}
-	}
-	if b.Port != nil {
-		if *b.Port < 1 || *b.Port > 65535 {
-			jerr(w, 400, "端口必须在 1-65535 范围")
-			return
-		}
-		c.Landings[idx].Port = *b.Port
-	}
-	if b.Enabled != nil {
-		c.Landings[idx].Enabled = *b.Enabled
-	}
-	if b.RemoteEnabled != nil {
-		c.Landings[idx].RemoteEnabled = *b.RemoteEnabled
-	}
-	if b.RemoteType != nil {
-		c.Landings[idx].RemoteType = *b.RemoteType
-	}
-	if c.Landings[idx].RemoteType == "" {
-		c.Landings[idx].RemoteType = "ss"
-	}
-	if b.RemoteHost != nil {
-		c.Landings[idx].RemoteHost = strings.TrimSpace(*b.RemoteHost)
-	}
-	if b.RemotePort != nil {
-		c.Landings[idx].RemotePort = *b.RemotePort
-	}
-	if b.RemoteMethod != nil {
-		c.Landings[idx].RemoteMethod = *b.RemoteMethod
-	}
-	if c.Landings[idx].RemoteMethod == "" {
-		c.Landings[idx].RemoteMethod = "2022-blake3-aes-128-gcm"
-	}
-	if b.RemotePassword != nil {
-		c.Landings[idx].RemotePassword = *b.RemotePassword
-	}
-	if b.RemoteUser != nil {
-		c.Landings[idx].RemoteUser = strings.TrimSpace(*b.RemoteUser)
-	}
-	if b.Password != nil && strings.TrimSpace(*b.Password) == "" {
-		jerr(w, 400, "落地 AnyTLS 密码不能为空")
-		return
-	}
-	// v1.5.35: 规范化 + 防御性自动启用远端（修「填了远端字段但开关没开」导致落地走 direct）
-	normalizeLanding(&c.Landings[idx])
-	// 远端校验（启用时）
-	if msg := validateLandingRemote(&c.Landings[idx]); msg != "" {
-		jerr(w, 400, msg)
-		return
-	}
-	// 端口冲突预检
-	if msg := portConflicts(c); msg != "" {
-		c.Landings[idx] = prev
-		_ = configSet(c)
-		jerr(w, 400, "端口冲突: "+msg+"。已撤销本次端口改动。")
-		return
-	}
-	if err := configSet(c); err != nil {
-		jerr(w, 500, "保存失败: "+err.Error())
-		return
-	}
-	if b.Password != nil {
-		if err := setLandingPassword(b.ID, *b.Password); err != nil {
-			restoreLandingApply(original, secData, secExisted)
-			jerr(w, 500, "保存落地 AnyTLS 密码失败: "+err.Error())
-			return
-		}
-	}
-	// 同步 genconf + restart + verify
-
-	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
-		restoreLandingApply(original, secData, secExisted)
-		jwrite(w, 500, map[string]any{
-			"ok":     false,
-			"error":  gerr.Error(),
-			"hint":   "落地服务配置未应用成功，已回滚 panel.json 与落地凭证；查看 journalctl -u sing-box",
-			"active": active,
-		})
-		return
-	}
-	jwrite(w, 200, map[string]any{"ok": true, "landing": landingToMap(c.Landings[idx])})
-}
-
-// landingDeleteHandler 删除某个落地服务（含清理 secrets 凭证）。
-// POST {id}
-func landingDeleteHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		jerr(w, 405, "方法不允许")
-		return
-	}
-	var b struct {
-		ID string `json:"id"`
-	}
-	json.NewDecoder(r.Body).Decode(&b)
-	c := configGet()
-	idx := -1
-	for i := range c.Landings {
-		if c.Landings[i].ID == b.ID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		jerr(w, 404, "未找到落地服务: "+b.ID)
-		return
-	}
-	// 清理 secrets 凭证（删 LANDING_<id>_PASS/UUID 行）
-	if err := removeSecretsByPrefix("LANDING_" + b.ID + "_"); err != nil {
-		jerr(w, 500, "清理凭证失败: "+err.Error())
-		return
-	}
-	c.Landings = append(c.Landings[:idx], c.Landings[idx+1:]...)
-	if err := configSet(c); err != nil {
-		jerr(w, 500, "保存失败: "+err.Error())
-		return
-	}
-	// 同步 genconf + restart + verify
-	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
-		jwrite(w, 500, map[string]any{
-			"ok":     false,
-			"error":  gerr.Error(),
-			"hint":   "落地服务已删除但 sing-box 未能正常重启，查看 journalctl -u sing-box",
-			"active": active,
-		})
-		return
-	}
-	jwrite(w, 200, map[string]bool{"ok": true})
-}
-
-// landingRegenHandler 重置某个落地服务的 anytls 凭证（生成新 pass+uuid）。
-// POST {id}
-func landingRegenHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		jerr(w, 405, "方法不允许")
-		return
-	}
-	var b struct {
-		ID string `json:"id"`
-	}
-	json.NewDecoder(r.Body).Decode(&b)
-	c := configGet()
-	found := false
-	for _, L := range c.Landings {
-		if L.ID == b.ID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		jerr(w, 404, "未找到落地服务: "+b.ID)
-		return
-	}
-	out, err := exec.Command(binAdmin, "regen-landing", b.ID).CombinedOutput()
-	if err != nil {
-		jerr(w, 500, "重置凭证失败: "+string(out))
-		return
-	}
-	// 同步 genconf + restart + verify（凭证变了，sing-box 要重新读 secrets）
-	if active, gerr := genconfRestartVerify("sing-box"); gerr != nil {
-		jwrite(w, 500, map[string]any{
-			"ok":     false,
-			"error":  gerr.Error(),
-			"hint":   "凭证已重置但 sing-box 未能正常重启，查看 journalctl -u sing-box",
-			"active": active,
-		})
-		return
-	}
-	// 返回更新后的落地服务（含新 password）
-	var updated map[string]any
-	cc := configGet()
-	for _, L := range cc.Landings {
-		if L.ID == b.ID {
-			updated = landingToMap(L)
-			break
-		}
-	}
-	jwrite(w, 200, map[string]any{"ok": true, "landing": updated})
 }
 
 // removeSecretsByPrefix 删除 secrets.env 里所有以指定前缀开头的 key 行（如 LANDING_1_）。
@@ -2875,11 +2554,7 @@ func removeSecretsByPrefix(prefix string) error {
 	if !strings.HasSuffix(out, "\n") {
 		out += "\n"
 	}
-	tmp := secretsPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(out), 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, secretsPath)
+	return atomicWrite(secretsPath, []byte(out))
 }
 
 // ===================== 旧落地 API 兼容（v1.5.26 deprecated）=====================
@@ -2943,12 +2618,17 @@ func group2Handler(w http.ResponseWriter, r *http.Request) {
 // 安装：写开关=true + genconf + 若 sing-box/caddy 未运行则 enable+start
 // 卸载：写开关=false + genconf + 若对应进程无其他启用服务则 stop+disable
 func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
+	configChangeMu.Lock()
+	defer configChangeMu.Unlock()
 	if r.Method != "POST" {
 		jerr(w, 405, "方法不允许")
 		return
 	}
 	var b struct{ Service, Action string }
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		jerr(w, 400, "请求格式错误或请求体过大")
+		return
+	}
 	if b.Action != "install" && b.Action != "uninstall" {
 		jerr(w, 400, "action 必须为 install/uninstall")
 		return
@@ -2981,7 +2661,7 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, "保存配置失败: "+err.Error())
 		return
 	}
-	if out, err := exec.Command(binGenConf, confTarget).CombinedOutput(); err != nil {
+	if out, err := command(binGenConf, confTarget).CombinedOutput(); err != nil {
 		_ = configSet(original)
 		jerr(w, 500, "生成配置失败（已回滚服务开关，服务未重启）: "+string(out))
 		return
@@ -2993,8 +2673,8 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 		needProc = c.CaddyEnable == "true" || c.SvcNaiveEnabled == "true"
 	}
 	if b.Action == "install" || needProc {
-		_ = exec.Command("systemctl", "enable", procName).Run()
-		restartErr := exec.Command("systemctl", "restart", procName).Run()
+		_ = command("systemctl", "enable", procName).Run()
+		restartErr := command("systemctl", "restart", procName).Run()
 		// v1.5.24：验证服务真的 active（旧版无脑返回 ok，caddy deactivating 时
 		// 用户以为装好了实际没跑起来）。等待最多 4 秒确认状态。
 		st := ""
@@ -3007,7 +2687,7 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if restartErr != nil || st != "active" {
 			_ = configSet(original)
-			_ = exec.Command(binGenConf, confTarget).Run()
+			_ = command(binGenConf, confTarget).Run()
 			oldNeedProc := false
 			if procName == "sing-box" {
 				oldNeedProc = original.SvcSSEnabled == "true" || original.SvcAnyTLSEnabled == "true" || original.SvcSocksEnabled == "true" || len(enabledLandings(original)) > 0
@@ -3015,9 +2695,9 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 				oldNeedProc = original.CaddyEnable == "true" || original.SvcNaiveEnabled == "true"
 			}
 			if oldNeedProc {
-				_ = exec.Command("systemctl", "restart", procName).Run()
+				_ = command("systemctl", "restart", procName).Run()
 			} else {
-				_ = exec.Command("systemctl", "stop", procName).Run()
+				_ = command("systemctl", "stop", procName).Run()
 			}
 			errMsg := fmt.Sprintf("%s 安装后未进入 active（当前状态 %s），可能配置错误或端口冲突", procName, st)
 			if restartErr != nil {
@@ -3032,8 +2712,8 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		_ = exec.Command("systemctl", "stop", procName).Run()
-		_ = exec.Command("systemctl", "disable", procName).Run()
+		_ = command("systemctl", "stop", procName).Run()
+		_ = command("systemctl", "disable", procName).Run()
 	}
 	jwrite(w, 200, map[string]any{"ok": true, "service": b.Service, "installed": b.Action == "install", "proc": procName, "proc_on": needProc || b.Action == "install"})
 }

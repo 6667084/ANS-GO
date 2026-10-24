@@ -20,26 +20,51 @@ CONF="/etc/ansgo/panel.json"
 SECRETS="/etc/ansgo/secrets.env"
 CERTDIR="${BV_CERTDIR:-/etc/ssl/ansgo}"
 
-# 加载密钥到环境（尽力加载；python 段会直接读文件做权威解析，
-# 故此处 source 失败不致命——如某个值含空格未加引号时 source 会报错，
-# 但 python 的逐行 partition 解析不受影响）。v1.5.23: 加 || true 避免 set -e 退出。
-if [ -f "$SECRETS" ]; then set -a; source "$SECRETS" 2>/dev/null || true; set +a; fi
-
 case "${1:-all}" in
   sing-box|caddy|all|validate) ;;
   *) echo "用法: ansgo-genconf {sing-box|caddy|all|validate}" >&2; exit 1 ;;
 esac
 
 python3 - "$@" <<'PYEOF'
-import json, os, sys, subprocess, base64
+import json, os, sys, subprocess, base64, tempfile, fcntl, copy
 
-CONF = "/etc/ansgo/panel.json"
+# ANSGO_ROOT 仅供隔离安装/回归使用，空值保持生产路径。
+ROOT = os.environ.get("ANSGO_ROOT", "")
+def rooted(path):
+    return ROOT + path
+CONF = rooted("/etc/ansgo/panel.json")
 CERTDIR = os.environ.get("BV_CERTDIR", "/etc/ssl/ansgo")
-SECRETS = "/etc/ansgo/secrets.env"
+SECRETS = rooted("/etc/ansgo/secrets.env")
 mode = sys.argv[1] if len(sys.argv) > 1 else "all"
 
 # 证书路径：manual 模式读 panel.json 的 cert_fullchain/cert_privkey，否则回退 CERTDIR
 # （此块在下方读 panel.json 之后才完成解析，这里只声明默认值兜底）
+
+# 同一个生成事务内读取和替换配置，防止并发校验/rename 交错。
+lock_path = rooted("/run/ansgo-genconf.lock")
+os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+lock_file = os.fdopen(os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600), "a+")
+fcntl.flock(lock_file, fcntl.LOCK_EX)
+
+def do_validate():
+    failed = False
+    for binary, args in (
+        (rooted("/usr/local/bin/sing-box"), ["check", "-c", rooted("/etc/sing-box/config.json")]),
+        (rooted("/usr/local/bin/caddy"), ["validate", "--config", rooted("/etc/caddy/Caddyfile"), "--adapter", "caddyfile"]),
+    ):
+        try:
+            with tempfile.TemporaryFile() as log:
+                r = subprocess.run([binary] + args, stdout=log, stderr=log, timeout=30)
+                log.seek(0)
+                print(log.read(8192).decode(errors="replace"))
+                failed |= r.returncode != 0
+        except (OSError, subprocess.TimeoutExpired) as e:
+            print(str(e), file=sys.stderr)
+            failed = True
+    return 1 if failed else 0
+
+if mode == "validate":
+    sys.exit(do_validate())
 
 # ---- 读取配置 ----
 with open(CONF) as f:
@@ -61,90 +86,60 @@ SS_METHOD = "2022-blake3-aes-128-gcm"
 #   旧的 group2 单落地服务由 upgrade.sh 迁移为 landings[0]。
 LANDINGS = g("landings", []) or []
 
-# v1.5.35: 与 Go 端 normalizeLanding / migrateLandings 同语义的落地服务规范化。
-#   背景：entrypoint 在 ansgo-panel 启动前就调用了 ansgo-genconf，所以 Go 端的启动迁移
-#   （修「填了远端字段但 remote_enabled=false」脏数据）此时还没跑，生成的 config.json
-#   仍是旧的。这里在 genconf 入口同步做一次规范化 + 落盘，保证容器/裸金属重启后
-#   config.json 立刻反映修正（无需进面板重存）。
-#   规则：远端字段齐全（host + port + 凭证）且 SS2022 密钥可规范化时，自动 remote_enabled=true；
-#         按 remote_type 清理无关字段（ss 清 remote_user；socks 清 remote_method）。
-def _ss2022_key_ok(method, key):
-    """返回规范化后的合法 SS2022 密钥；非法/长度错返回 None。"""
-    if not key:
-        return None
-    want = 16 if (method or "").startswith("2022-blake3-aes-128") else \
-           (32 if (method or "").startswith("2022-blake3-aes-256") else 0)
-    if want <= 0:
-        return key
-    import re as _re
-    for cand in (key.strip(), key.strip() + "=="):
-        for v in (cand, cand.replace("-", "+").replace("_", "/")):
-            try:
-                raw = base64.b64decode(v.encode(), validate=True)
-                if len(raw) == want:
-                    return base64.b64encode(raw).decode()
-            except Exception:
-                pass
-    return None
-
-def _normalize_landings_and_persist(cfg_obj):
-    """原地规范化 cfg_obj['landings']，若有变化则写回 panel.json（幂等）。"""
-    lands = cfg_obj.get("landings") or []
-    if not isinstance(lands, list) or not lands:
-        return
-    changed = False
-    for L in lands:
-        if not isinstance(L, dict):
-            continue
-        L["remote_host"] = (L.get("remote_host") or "").strip()
-        rtype = (L.get("remote_type") or "ss").strip().lower() or "ss"
-        L["remote_type"] = rtype
-        if not (L.get("remote_method") or "").strip():
-            L["remote_method"] = "2022-blake3-aes-128-gcm"
-        host = L["remote_host"]
-        try:
-            port = int(L.get("remote_port", 0) or 0)
-        except (ValueError, TypeError):
-            port = 0
-        password = (L.get("remote_password") or "")
-        # 字段齐全 + 校验通过 → 自动启用
-        if not _to_bool(L.get("remote_enabled")) and host and port > 0 and password:
-            if rtype != "socks" or (L.get("remote_user") or ""):
-                method = L.get("remote_method", "2022-blake3-aes-128-gcm")
-                if rtype == "socks":
-                    L["remote_enabled"] = True
-                    changed = True
-                else:
-                    norm = _ss2022_key_ok(method, password)
-                    if norm is not None:
-                        L["remote_enabled"] = True
-                        if norm != password:
-                            L["remote_password"] = norm
-                        changed = True
-        # 按类型清理无关字段
-        if rtype == "socks":
-            if L.get("remote_method"):
-                L["remote_method"] = ""
-                changed = True
-        else:
-            L["remote_type"] = "ss"
-            if L.get("remote_user"):
-                L["remote_user"] = ""
-                changed = True
-    if changed:
-        try:
-            import json as _json
-            with open(CONF, "w") as f:
-                _json.dump(cfg_obj, f, indent=2, ensure_ascii=False)
-            print("[ansgo-genconf] 已按 v1.5.35 规范化落地服务远端开关（远端字段齐全的落地自动启用远端出口）")
-        except Exception as e:
-            print(f"[ansgo-genconf] WARN: 规范化写盘失败: {e}", file=sys.stderr)
-
 def _to_bool(v):
     return str(v).strip().lower() in ("true", "1", "yes")
 
-_normalize_landings_and_persist(cfg)
-LANDINGS = cfg.get("landings") or []
+def _ss_key(method, key):
+    want = 16 if method.startswith("2022-blake3-aes-128") else (32 if method.startswith("2022-blake3-aes-256") or method == "2022-blake3-chacha20-poly1305" else 0)
+    if not want:
+        return key
+    for pad in ("", "=", "==", "==="):
+        try:
+            raw = base64.b64decode((key.strip().replace("-", "+").replace("_", "/") + pad).encode(), validate=True)
+            if len(raw) == want:
+                return base64.b64encode(raw).decode()
+        except (ValueError, TypeError):
+            pass
+    return None
+
+def normalize_landings(source):
+    # 只读规范化；schema<2 的自动启用只在旧数据迁移语义中生效。
+    lands = copy.deepcopy(source.get("landings") or [])
+    if len(lands) > 32:
+        raise ValueError("落地服务最多 32 个")
+    for L in lands:
+        rtype = (L.get("remote_type") or "ss").strip().lower()
+        if rtype not in ("ss", "socks"):
+            raise ValueError("remote_type 必须为 ss 或 socks")
+        key = "remote_" + rtype
+        remote = L.get(key)
+        if remote is None:
+            remote = {k: L.get("remote_" + k, "" if k != "port" else 0)
+                      for k in (("host", "port", "method", "password") if rtype == "ss" else ("host", "port", "user", "password"))}
+        if not isinstance(remote, dict):
+            raise ValueError("远端配置必须是对象")
+        for draft in (L.get("remote_ss") or {}, L.get("remote_socks") or {}, remote):
+            if any(len(str(value)) > 256 for value in draft.values()):
+                raise ValueError("远端每个字段不得超过 256 字符")
+        host = remote.get("host") or ""
+        port = int(remote.get("port") or 0)
+        password = remote.get("password") or ""
+        method = remote.get("method") or "2022-blake3-aes-128-gcm"
+        user = remote.get("user") or ""
+        norm = _ss_key(method, password) if rtype == "ss" else password
+        valid = bool(host.strip() and 1 <= port <= 65535 and password and norm and
+                     (rtype != "socks" or (user and not any(c == ":" or c.isspace() for c in user + password))))
+        enabled = _to_bool(L.get("remote_enabled"))
+        if int(source.get("landings_schema", 0)) < 2 and valid:
+            enabled = True
+        if enabled and not valid:
+            raise ValueError("启用的落地远端配置不完整或凭证无效")
+        L.update(remote_type=rtype, remote_enabled=enabled, remote_host=host,
+                 remote_port=port, remote_method=method, remote_user=user,
+                 remote_password=norm if norm is not None else password)
+    return lands
+
+LANDINGS = normalize_landings(cfg)
 
 # 伪装站点
 DISGUISE_PANEL = g("disguise_panel", "proxy:https://example.com")
@@ -197,7 +192,7 @@ def normalize_ss2022_key(method, key):
     want = 0
     if method.startswith("2022-blake3-aes-128"):
         want = 16
-    elif method.startswith("2022-blake3-aes-256"):
+    elif method.startswith("2022-blake3-aes-256") or method == "2022-blake3-chacha20-poly1305":
         want = 32
     if want <= 0:
         return key, ""
@@ -283,43 +278,33 @@ def check_port_conflicts():
         print("请在面板修改冲突端口后重试（不同服务必须使用不同端口）。", file=sys.stderr)
         sys.exit(3)
 
+def stage_config(path, content, validator):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".ansgo-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o600)
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        binary, arguments = validator
+        if os.path.exists(binary):
+            # 日志写临时文件，避免失败时无限 capture_output 占用内存。
+            with tempfile.TemporaryFile() as log:
+                r = subprocess.run([binary] + [temporary if a == "{config}" else a for a in arguments],
+                                   stdout=log, stderr=log, timeout=30)
+                if r.returncode:
+                    size = log.tell()
+                    log.seek(max(0, size - 8192))
+                    raise RuntimeError("配置校验失败: " + log.read(8192).decode(errors="replace"))
+        staged.append((temporary, path))
+    except BaseException:
+        os.unlink(temporary)
+        raise
+
 def write_singbox_config(config):
-    # v1.5.28 防御：写新 config 前备份旧文件，写完用 sing-box check 预检；
-    # 校验失败则回滚旧配置并退出，避免把坏配置喂给 systemd 后 sing-box 进入 activating/restart loop。
-    os.makedirs("/etc/sing-box", exist_ok=True)
-    cfg_path = "/etc/sing-box/config.json"
-    backup = None
-    if os.path.exists(cfg_path):
-        try:
-            backup = open(cfg_path).read()
-        except Exception:
-            backup = None
-    with open(cfg_path, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-    sb_bin = "/usr/local/bin/sing-box"
-    if os.path.exists(sb_bin):
-        try:
-            r = subprocess.run([sb_bin, "check", "-c", cfg_path], capture_output=True, text=True, timeout=30)
-            ok = (r.returncode == 0)
-            err_out = (r.stderr or r.stdout or "").strip()
-        except Exception as e:
-            ok = False
-            err_out = str(e)
-        if not ok:
-            if backup is not None:
-                with open(cfg_path, "w") as f:
-                    f.write(backup)
-            else:
-                try:
-                    os.remove(cfg_path)
-                except FileNotFoundError:
-                    pass
-            err_tail = err_out.splitlines()
-            err_tail = err_tail[-1] if err_tail else "未知错误"
-            print("ansgo-genconf: ❌ sing-box config 校验失败，已回滚旧配置（不会重启 sing-box）：", file=sys.stderr)
-            print(f"  {err_tail}", file=sys.stderr)
-            print("  常见原因：落地服务远端 SS 密钥长度/协议字段错误，或 AnyTLS/出站配置不被当前 sing-box 支持。", file=sys.stderr)
-            sys.exit(4)
+    stage_config(rooted("/etc/sing-box/config.json"), json.dumps(config, indent=2, ensure_ascii=False),
+                 (rooted("/usr/local/bin/sing-box"), ["check", "-c", "{config}"]))
 
 
 def gen_singbox():
@@ -516,43 +501,8 @@ def gen_caddy():
     if CADDY_ENABLE:
         blocks.append(f":80 {{\n  redir https://{DOMAIN}{{uri}} permanent\n}}\n")
 
-    os.makedirs("/etc/caddy", exist_ok=True)
-    # v1.5.23 防御：写新 Caddyfile 前备份旧文件，写完用 caddy validate 预检；
-    # 校验失败（如 naive 密码含空格/{} 破坏语法）则回滚旧文件并报错退出，
-    # 避免把坏配置喂给 caddy 导致「重启后无法运行」（用户表现为 Naive 装上就挂）。
-    CADDYFILE = "/etc/caddy/Caddyfile"
-    backup = None
-    if os.path.exists(CADDYFILE):
-        try:
-            backup = open(CADDYFILE).read()
-        except Exception:
-            backup = None
-    new_content = "\n".join(blocks)
-    with open(CADDYFILE, "w") as f:
-        f.write(new_content)
-    # 预检：仅当 caddy 二进制存在时才校验（裸金属首次安装可能还没装 caddy）
-    caddy_bin = "/usr/local/bin/caddy"
-    if os.path.exists(caddy_bin):
-        try:
-            r = subprocess.run([caddy_bin, "validate", "--config", CADDYFILE, "--adapter", "caddyfile"],
-                               capture_output=True, text=True, timeout=30)
-            ok = (r.returncode == 0)
-            err_out = (r.stderr or r.stdout or "").strip()
-        except Exception as e:
-            ok = False
-            err_out = str(e)
-        if not ok:
-            # 回滚旧配置，绝不把坏配置留下（caddy 重启会失败）
-            if backup is not None:
-                with open(CADDYFILE, "w") as f:
-                    f.write(backup)
-            err_tail = err_out.splitlines()
-            err_tail = err_tail[-1] if err_tail else "未知错误"
-            print(f"ansgo-genconf: ❌ Caddyfile 校验失败，已回滚旧配置（不会重启 caddy）：", file=sys.stderr)
-            print(f"  {err_tail}", file=sys.stderr)
-            print(f"  常见原因：NaiveProxy 用户名/密码含空格或 {{}} 等特殊字符。", file=sys.stderr)
-            print(f"  请在面板「服务管理」页改用不含空白的凭证后重试。", file=sys.stderr)
-            sys.exit(4)
+    stage_config(rooted("/etc/caddy/Caddyfile"), "\n".join(blocks),
+                 (rooted("/usr/local/bin/caddy"), ["validate", "--config", "{config}", "--adapter", "caddyfile"]))
     note = f":443 纯伪装={DISGUISE_PANEL}" if CADDY_ENABLE else "caddy_enable=false（跳过 80/443，nginx 等接管）"
     if SVC_NAIVE:
         note += f", :{NAIVE_PORT} naive伪装={DISGUISE_NAIVE}"
@@ -560,20 +510,23 @@ def gen_caddy():
     print(f"已生成 /etc/caddy/Caddyfile ({note}{suffix})")
 
 # ===================== 校验 =====================
-def do_validate():
-    print("=== sing-box check ===")
-    r = subprocess.run(["/usr/local/bin/sing-box", "check", "-c", "/etc/sing-box/config.json"])
-    if r.returncode == 0:
-        print("sing-box config OK")
-    print("=== caddy validate ===")
-    subprocess.run(["/usr/local/bin/caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"])
 
-if mode in ("sing-box", "caddy", "all"):
-    check_port_conflicts()
-if mode in ("sing-box", "all"):
-    gen_singbox()
-if mode in ("caddy", "all"):
-    gen_caddy()
-if mode == "validate":
-    do_validate()
+staged = []
+try:
+    if mode in ("sing-box", "caddy", "all"):
+        check_port_conflicts()
+    if mode in ("sing-box", "all"):
+        gen_singbox()
+    if mode in ("caddy", "all"):
+        gen_caddy()
+    if mode == "validate":
+        sys.exit(do_validate())
+    # all 模式两份配置都通过校验后再替换，校验失败不影响任何正式文件。
+    for temporary, path in staged:
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+finally:
+    for temporary, _ in staged:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 PYEOF

@@ -38,7 +38,7 @@ func ss2022WantBytes(method string) int {
 	switch {
 	case method == "" || strings.HasPrefix(method, "2022-blake3-aes-128"):
 		return 16
-	case strings.HasPrefix(method, "2022-blake3-aes-256"):
+	case strings.HasPrefix(method, "2022-blake3-aes-256") || method == "2022-blake3-chacha20-poly1305":
 		return 32
 	default:
 		return 0
