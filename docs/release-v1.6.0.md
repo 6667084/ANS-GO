@@ -1,6 +1,6 @@
 # ANS-GO v1.6.0 Release Notes
 
-> **状态：即将发布。** 推送 `v1.6.0` tag 后，CI 自动生成 6 项 release 资产与容器镜像。本文不含真实 IP、域名、凭证、厂商或机房信息。
+> **状态：已发布。** GitHub Latest 为 `v1.6.0`，包含 6 项 release 资产和 `SHA256SUMS`，并已发布 `ghcr.io/6667084/ansgo:v1.6.0` / `latest` 的 amd64、arm64 镜像。本文不含真实 IP、域名、凭证、厂商或机房信息。
 
 ## 变更清单
 
@@ -59,10 +59,12 @@
 
 ## 升级说明
 
-1. 运行 `upgrade.sh --yes --ver v1.6.0`，或在裸金属控制台的「系统维护」页执行一键升级。
+1. 在服务器上运行 `curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh | bash -s -- --yes --ver v1.6.0`，或在裸金属控制台的「系统维护」页执行一键升级。
 2. 升级会自动迁移旧单落地和旧扁平远端字段，并保留 SS/SOCKS5 两套配置；特殊字符密码按原样保留。
 3. 升级完成后硬刷新浏览器，以加载嵌入新面板二进制的前端资源。
-4. 如需恢复配置，使用升级生成的 `/etc/ansgo-backup/upgrade-*.tar.gz` 配合 `ansgo-admin restore`；升级器在校验、切换或验证失败时也会自动回滚。
+4. 如需恢复配置，使用升级生成的 `/etc/ansgo-backup/upgrade-<TIMESTAMP>.tar.gz` 配合 `ansgo-admin restore /etc/ansgo-backup/upgrade-<TIMESTAMP>.tar.gz`；升级器在校验、切换或验证失败时也会自动回滚。
+
+升级器不带 `--yes` 时从 `/dev/tty` 读取确认。有终端的管道执行可以交互确认；CI 或其他无 TTY 环境必须使用 `--yes`。v1.6.0 之前的面板没有升级按钮，先运行上述命令完成首次升级；Docker 形态始终在宿主执行升级命令。
 
 ## 兼容性
 

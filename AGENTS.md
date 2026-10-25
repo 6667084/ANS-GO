@@ -5,9 +5,9 @@
 >
 > **部署状态：✅ 已部署并端到端验证。** 可复现产物在 `deploy/`，一键部署见 §11。
 >
-> **当前已发布版本：v1.5.37**（release、6 项资产与 ghcr.io 镜像齐全）。完整发布历史见 GitHub Releases。
+> **当前已发布版本：v1.6.0**（GitHub Latest、6 项资产、SHA256SUMS 与 `ghcr.io/6667084/ansgo:v1.6.0` / `latest` 双架构镜像齐全）。完整发布历史见 GitHub Releases。
 >
-> **v1.6.0（本版，即将发布）**：落地服务改为双协议独立草稿与事务化写入；控制台全新重做并新增「系统维护」；裸金属与 Docker 统一资源、日志、备份边界；升级改为先暂存校验后切换并支持面板/定时升级。发布由负责人推送 tag 后由 CI 自动产出 6 项资产与镜像；详细说明见 `docs/release-v1.6.0.md`。
+> **v1.6.0（已发布）**：落地服务改为双协议独立草稿与事务化写入；控制台全新重做并新增「系统维护」；裸金属与 Docker 统一资源、日志、备份边界；升级改为先暂存校验后切换并支持面板/定时升级。详细说明见 `docs/release-v1.6.0.md`。
 >
 > ### 版本演进摘要（一行一版，详细根因见对应 release notes）
 >
@@ -139,7 +139,7 @@
 | NaiveProxy (caddy) | **随机** 10000-65535（v1.5.12 前 44333）| HTTPS forward proxy | 按需安装（不参与落地）| ✅ |
 | AnyTLS (sing-box) | **随机** 10000-65535（v1.5.12 前 21111）| TLS | 按需安装 | ✅ |
 | Shadowsocks (sing-box) | **随机** 10000-65535（v1.5.12 前 33899）| SS2022 | 按需安装 | ✅ |
-| SOCKS5 (sing-box) | **随机** 10000-65535（默认 10808）| SOCKS5（强制鉴权）| 按需安装（不参与落地）| ✅ |
+| SOCKS5 (sing-box) | **随机** 10000-65535 | SOCKS5（强制鉴权）| 按需安装（不参与落地）| ✅ |
 | 落地服务 anytls-2 | **随机** 10000-65535（v1.5.12 前 21112）| TLS | 按需（经 SS 落地）| ✅ |
 | caddy HTTP（重定向）| `80` TCP | HTTP | 固定 | ❌ |
 | SSH | `25822` TCP | SSH | **已加固**（公钥+禁密码，见 §14）| ❌ |
@@ -215,7 +215,7 @@ manual 模式: cert_fullchain + cert_privkey 字段指定的绝对路径（用�
 - ⚠️ **NaiveProxy 是普通代理服务，不参与任何远端落地**（caddy 与 sing-box 是独立进程，跨进程路由不可行）
 - ⚠️ **NaiveProxy 凭证不能含空格/制表符/换行/花括号 `{}`**（v1.5.23）：凭证写入 Caddyfile `basic_auth user pass` 指令，含这些字符会破坏 Caddyfile 语法 → caddy 无法启动。面板「服务管理」页改凭证时前端 + 后端均校验拦截；`ansgo-genconf` 生成后用 `caddy validate` 预检兜底。🎲 随机生成的凭证是纯字母数字（安全）
 
-> ⚠️ **NaiveProxy 端口不要用 443**：443 留给纯反代伪装站（保证域名直访有效）。naive 用非标准端口（默认 44333），客户端带端口连接。
+> ⚠️ **NaiveProxy 端口不要用 443**：443 留给纯反代伪装站（保证域名直访有效）。未指定时安装器为 naive 随机分配 10000-65535 的非冲突端口，客户端须带端口连接。
 
 ### 5.2 AnyTLS（sing-box inbound）
 - sing-box v1.13.13，`/etc/sing-box/config.json` 内的 `type: anytls` inbound
@@ -327,15 +327,17 @@ ansgo-admin cert renew          # 手动续期
 ansgo-admin cert issue          # 用 panel.json 里保存的 Dynu 凭证触发完整签发（v1.5.27，manual→acme 切换后的 SSH 兜底）
 ansgo-admin panel-pass          # 重置面板密码（打印新密码）
 ansgo-admin panel-path          # 重置面板 URL 路径（兜底）
-ansgo-admin panel-port          # 重置面板端口（兜底）
+ansgo-admin panel-port [PORT]   # 重置面板端口（兜底；不传时为 15608）
 ansgo-admin firewall [list|open PORT|close PORT]
 ansgo-admin backup              # 备份所有配置到 /etc/ansgo-backup/
 ansgo-admin prune [--yes]       # 清理旧备份、临时文件与超额 journal
 ansgo-admin upgrade [升级参数]   # 调用统一版本升级器
 ansgo-admin update [sing-box|caddy|panel [路径]] # 单组件更新（兼容入口）
-ansgo-admin restore [备份.tar.gz] # 回滚配置
+ansgo-admin restore [备份.tar.gz] # 恢复含 manifest.json 的归档；省略时取最新归档
 ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份）；彻底卸载用 install.sh --uninstall --purge
 ```
+
+跨版本升级使用 `ansgo-admin upgrade --yes [--ver vX.Y.Z]` 或 `/usr/local/bin/ansgo-upgrade --yes`，不要把 `ansgo-admin update` 或手工覆盖二进制当作常规升级路径。备份统一在 `/etc/ansgo-backup/<类别>-<TIMESTAMP>[-n].tar.gz`；日志在 `/var/log/ansgo/`。`regen2` 和 `group2` 仅为兼容别名，新落地应在面板「落地服务」页管理。
 
 ---
 
@@ -397,7 +399,7 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 
 > v1.3.0 架构变更：install.sh **只装面板 + 证书**，代理服务（NaiveProxy/AnyTLS/Shadowsocks）改为**登录面板后在「服务安装」页按需启用**。
 >
-> v1.4.0 新增 **Docker 一体化形态**：`install.sh --docker` 在 KVM 主机用单容器（`ghcr.io/jiasongji/ansgo:latest`，all-in-one）跑全套——容器内 systemd 作 PID 1，复用裸金属全部 unit/脚本/面板代码（systemctl/journalctl/ansgo-admin 原生可用，**面板 Go 代码与 bash 脚本 0 改动**），配置/密钥/证书持久化到 docker volume，host 网络 + privileged。LXC/低配仍走裸金属。
+> v1.4.0 新增 **Docker 一体化形态**：`install.sh --docker` 在 KVM 主机用单容器（`ghcr.io/6667084/ansgo:latest`，all-in-one）跑全套——容器内 systemd 作 PID 1，复用裸金属全部 unit/脚本/面板代码（systemctl/journalctl/ansgo-admin 原生可用，**面板 Go 代码与 bash 脚本 0 改动**），配置/密钥/证书持久化到 docker volume，host 网络 + privileged。LXC/低配仍走裸金属。
 
 ### install.sh 阶段（装面板 + 证书）
 
@@ -499,7 +501,7 @@ ansgo-admin uninstall           # 卸载面板管理组件（保留配置备份�
 
 ### 交互式
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh)
 # 先显示主菜单：1) 安装/部署  2) 卸载（保留配置/卷）  3) 彻底卸载  4) 部署落地服务器
 # 选 1 后依次交互输入：域名、Dynu 凭证（v1.5.37 起 API Key 主引导，OAuth 旧配置兼容）、各端口、面板用户名等
 ```
@@ -508,7 +510,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/instal
 
 裸金属（LXC / 低配推荐，systemd 直管三服务）：
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com \
              --dynu-key <API_KEY> \
              --email you@example.com \
@@ -524,7 +526,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 Docker 一体化（KVM / 资源充裕推荐，仅加 `--docker`，其余参数一致）：
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com \
              --dynu-key <API_KEY> \
              --email you@example.com \
@@ -539,7 +541,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --non-interactive
 ```
 
-参数全集（完整说明见 GitHub README「参数全集」表）：`--domain`（必填）`--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`，acme 模式必填）`--email` `--ss-port`(默认 23456) `--anytls-port`(8443) `--socks-port`(10808) `--naive-port`(44333) `--panel-port`(15608) `--panel-user`(admin) `--disguise-panel` `--disguise-naive` `--cert-mode`(acme|manual，默认 acme) `--cert-fullchain`(manual 模式证书完整路径) `--cert-privkey`(manual 模式私钥完整路径) `--docker` `--server-ip`(v1.5.37+，显式公网入口 IP，IPv4/IPv6 严格校验，优先级最高，填了即跳过启动自动查询) `--panel-title`(v1.5.37+，节点信息基名，裸金属/Docker 通用) `--no-caddy`(v1.5.6+，不部署 caddy 的 80/443，让 nginx 等接管) `--non-interactive` `--force-bin`。
+参数全集（完整说明见 GitHub README「参数全集」表）：`--domain`（必填）`--dynu-key`（或 `--dynu-client-id`+`--dynu-secret`，acme 模式需要）`--email` `--ss-port` / `--anytls-port` / `--socks-port` / `--naive-port` / `--panel-port`（未指定时均随机生成于 10000-65535）`--panel-user`(admin) `--disguise-panel` `--disguise-naive` `--cert-mode`(acme|manual，默认 acme) `--cert-fullchain`(manual 模式证书完整路径) `--cert-privkey`(manual 模式私钥完整路径) `--docker` `--docker-mem` `--server-ip`（显式公网入口 IP）`--panel-title` `--no-caddy` `--non-interactive` `--force-bin`。
 >
 > **⭐ v1.5.5 新增：密码/密钥参数化（全部可选，留空则随机生成）**：
 > - `--ss-password KEY`：Shadowsocks 密钥，须 base64(16字节)，生成命令 `openssl rand -base64 16`
@@ -556,7 +558,7 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
 
 **全参数 + 自定义密码示例**（v1.5.5+，适合需要预先确定全部凭证的场景）：
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com \
              --dynu-key <API_KEY> \
              --email you@example.com \
@@ -569,9 +571,9 @@ curl -fsSL https://raw.githubusercontent.com/jiasongji/ANS-GO/main/install.sh \
              --non-interactive
 ```
 
-> **手动证书模式（与 acme 二选一）**：`--cert-mode manual --cert-fullchain /path/to/fullchain.pem --cert-privkey /path/to/privkey.pem`，无需 Dynu 凭证，跳过 acme 签发。Docker 模式需保证证书路径已挂载进容器（`docker-compose.yml` 的 volumes）。
+> **手动证书模式（与 acme 二选一）**：`--cert-mode manual --cert-fullchain /path/to/fullchain.pem --cert-privkey /path/to/privkey.pem`，无需 Dynu 凭证，跳过 acme 签发。Docker 模式使用面板「证书管理」页生成的宿主同步任务复制到固定同步目录，不应自行挂载任意证书路径。
 
-落地服务器专用：`bash install.sh --landing [--port 8388]`（在该机部署独立 ss-server，供中转机第二组接入）。
+落地服务器专用：`bash install.sh --landing [--port <PORT>] --non-interactive`（在该机部署独立 ss-server，供中转机落地服务接入）。
 
 卸载（自动检测 Docker / 裸金属）：
 
@@ -591,14 +593,14 @@ bash install.sh --uninstall --purge
 
 ### 资源来源（全部自有 GitHub / 官方上游）
 
-> ⚠️ **GitHub 账号已由 `jiasongji` 改名为 `6667084`**（v1.5.36 时点确认）。github.com/raw.githubusercontent 的旧 URL 经重定向仍可用；但 **ghcr 旧路径 `ghcr.io/jiasongji/ansgo` 是只读冻结快照**（实测：推送报 "requested installation does not exist"，且新镜像只推 `ghcr.io/6667084/ansgo` 不会传播到旧路径——存量部署拉旧路径永远是改名前版本）。v1.5.36 起 install.sh/upgrade.sh/compose/Dockerfile 的功能引用已全部改为规范命名空间 `6667084`；**upgrade.sh Docker 分支会自动把存量 compose 的旧镜像引用改写为规范路径**，否则服务器永远拉不到新镜像。
+所有功能性链接统一使用 `6667084/ANS-GO` 与 `ghcr.io/6667084/ansgo`。Release 必须包含 6 项二进制资产和 `SHA256SUMS`；当前 v1.6.0 已齐全。
 
-- 脚本/源码：`raw.githubusercontent.com/6667084/ANS-GO/main/deploy/...`（旧 jiasongji 路径重定向可用）
+- 脚本/源码：`raw.githubusercontent.com/6667084/ANS-GO/main/deploy/...`
 - ansgo-panel 二进制：`github.com/6667084/ANS-GO/releases/download/vX.Y.Z/ansgo-panel-linux-<arch>`
 - sing-box：**v1.5.3 起裸金属优先从 SagerNet 官方 release 下载**（`github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-linux-<arch>.tar.gz`，多架构），本项目 release vendored 作为兜底。Docker 在 `Dockerfile.allinone` 内同样从 SagerNet 拉取
 - caddy（naive 分支）：从 klzgrad/forwardproxy 源码用 xcaddy 编译。**裸金属 install.sh 优先拉本项目 release 预编译产物**（下载序：当前版本 release → **v1.5.16 vendored 兜底**（v1.5.36 新增，防发版漏传资产阻断部署）→ 现场 xcaddy 编译（自动装 Go 官方 1.22 二进制——apt 的 1.19 不支持 xcaddy 的 `toolchain` 指令；需 git，约 3-5 分钟））；Docker 在 `Dockerfile.allinone` 内现场编译
 - ⚠️ **release 资产维护（历史两次断供；v1.5.36 起 CI 自动保证）**：每次发新版本 release 必须上传全部 6 个资产（`ansgo-panel-linux-{amd64,arm64}` + `caddy-naive-linux-{amd64,arm64}` + `sing-box-linux-{amd64,arm64}.tar.gz`）。**v1.5.17~v1.5.35 连续 19 个版本只传了 panel 双架构资产**（caddy/sing-box 全缺），导致全新裸金属部署 caddy 必 404 → xcaddy 现场编译 → 低配机必败（v1.5.36 兜底修复：install.sh 加 v1.5.16 vendored 兜底源 + 资产恢复齐全）；更早 v1.5.0 也漏传过一次。**v1.5.36 起 `docker-publish.yml` 的 `release-assets` job 自动编译并 `gh release upload --clobber` 全部 6 资产**（panel 与镜像同源编译；caddy 复用 v1.5.16；sing-box 从 SagerNet 转传），手动断供风险消除。**发版后仍要自检**：`gh release view vX.Y.Z --json assets --jq '[.assets[].name]'` 必须 6 项齐全（CI 也可能失败）。caddy-naive 资产可直接复用 v1.5.16 的二进制（无版本耦合）；sing-box 资产从 SagerNet 官方 release 下载同名 tar.gz 转传。caddy-naive 本地交叉编译（仅当需更新 forwardproxy 版本时）：`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 xcaddy build --with github.com/caddyserver/forwardproxy=<本地forwardproxy naive分支> --output caddy-naive-linux-amd64`
-- Docker 一体化镜像（all-in-one：sing-box + caddy + 面板 + systemd，单容器跑全套）：`ghcr.io/6667084/ansgo:latest`（规范路径；旧 jiasongji 路径冻结只读，见上方改名说明）。
+- Docker 一体化镜像（all-in-one：sing-box + caddy + 面板 + systemd，单容器跑全套）：`ghcr.io/6667084/ansgo:latest`。
   **⭐ v1.5.36 起镜像更新主路径 = GitHub Actions 自动构建**（`.github/workflows/docker-publish.yml`）：推 `v*` tag 自动触发（或手动 `gh workflow run docker-publish.yml -f version=vX.Y.Z`），用仓库 `GITHUB_TOKEN`（packages:write）构建 amd64+arm64 并推 `:latest` + `:vX.Y.Z`——**不再依赖开发机 ghcr 凭据**（本机 gh token 无 write:packages scope，曾致手动 push 被拒）。
   手动兜底（Actions 不可用时，开发机执行）：`docker buildx build --builder ansgo-builder --platform linux/amd64,linux/arm64 --build-arg HTTP_PROXY=http://host.docker.internal:1666 --build-arg HTTPS_PROXY=http://host.docker.internal:1666 --build-arg PANEL_VERSION=X.Y.Z -t ghcr.io/6667084/ansgo:latest -t ghcr.io/6667084/ansgo:vX.Y.Z -f deploy/Dockerfile.allinone . --push`（国内需 `docker buildx create --driver docker-container --name ansgo-builder` + 代理注入；注意 OrbStack 默认 builder 对 amd64 模拟 + 代理下 apt 偶发 exit 255，换 docker-container builder 重试）
 - Docker 面板单镜像（仅面板，兼容用）：`ghcr.io/6667084/ansgo-panel:latest`（见 `deploy/Dockerfile`）
@@ -610,14 +612,14 @@ bash install.sh --uninstall --purge
 `upgrade.sh` 是统一跨版本升级器，区别于 install.sh（全新部署）和 `ansgo-admin update`（单组件兼容入口）。它从目标 tag 暂存脚本和资产，校验 SHA256 后再备份、迁移、切换和验证，失败自动回滚：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh | bash
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh | bash -s -- --yes
 # 参数：--docker | --metal（强制形态）/ --ver vX.Y.Z / --yes / --auto
 ```
 
 | 形态 | 升级动作 | 备份位置 |
 |------|---------|---------|
 | **裸金属** | 暂存目标 tag 的脚本和资产，SHA256 校验后备份、迁移、切换并验证活跃服务；失败自动恢复 | `/etc/ansgo-backup/upgrade-*.tar.gz` |
-| **Docker** | 切换明确版本镜像 tag，备份真实配置卷，再重建并验证 | `/etc/ansgo-backup/upgrade-*.tar.gz` |
+| **Docker** | 切换明确版本镜像 tag，备份真实配置卷，再重建并验证 | `/etc/ansgo-backup/docker-*.tar.gz` |
 
 **设计约束（脚本自包含，不依赖服务器旧版 ansgo-admin，避免鸡生蛋）**：
 - `--ver` 使脚本、资产和镜像严格来自同一 tag；`--auto` 仅在存在新稳定版时升级
@@ -625,6 +627,7 @@ curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.
 - 升级日志写入 `/var/log/ansgo/upgrade.log`，持久结果写入 `/var/lib/ansgo/upgrade.result`
 - `ANSGO_RAW_BASE`、`ANSGO_REL_BASE` 与 `ANSGO_RELEASE_API` 可仅对本次执行覆盖下载源
 - `--docker`/`--metal` 互斥；同时检测到两种形态标记返回 `ambiguous` 要求显式指定
+- 未带 `--yes` 时升级器从 `/dev/tty` 读取确认；无 TTY 自动化必须传 `--yes`。v1.6.0 之前没有面板升级入口，先执行一次此命令。
 - ⚠️ **bash set -u 陷阱**（v1.5.5 教训）：变量后紧跟全角标点（如 `$DOCKER_COMPOSE_FILE，`）会被当成另一个变量名，必须用 `${DOCKER_COMPOSE_FILE}` 界定
 
 ---
@@ -633,7 +636,7 @@ curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.
 
 1. ✅ **自测审计（已完成）**：`ansgo-admin status` + 面板全功能 + 服务安装/卸载 + 多协议连通 + IP 锁定 + 证书真实性（Let's Encrypt）均验证通过
 2. ✅ **GitHub 建项（已完成）**：公开仓库 `ANS-GO`，含 AGENTS.md + `deploy/`（脚本 + 面板源码）+ `install.sh`（一键部署），**不含** `.secrets.local`/`.build`
-3. ✅ **服务器部署（已完成 + 持续迭代）**：v1.5.37 已发布；v1.6.0 由统一升级器负责暂存、校验、备份、切换与验证。
+3. ✅ **服务器部署（已完成 + 持续迭代）**：v1.6.0 已发布；统一升级器负责暂存、校验、备份、切换与验证。
 4. **客户端实测（可选）**：用真实客户端（Clash.Meta / sing-box / naive 客户端）测各协议连通与分流
 
 ---
