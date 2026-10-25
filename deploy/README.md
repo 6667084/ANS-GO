@@ -61,7 +61,7 @@ docker exec -it ansgo ansgo-admin restore /etc/ansgo-backup/<CATEGORY>-<TIMESTAM
 cd /etc/ansgo-docker && docker compose logs --tail=200 ansgo
 ```
 
-Docker 的日常 `ansgo-admin backup` 位于容器持久卷的 `/etc/ansgo-backup/`；Docker 升级器另在宿主 `/etc/ansgo-backup/docker-*.tar.gz` 创建自动回滚归档。完整命令表、故障排查和卸载说明见根目录 README。
+容器内 `ansgo-admin backup` 的归档位于 `/etc/ansgo-backup/`。自 **v1.6.2** 起，该目录挂载为命名卷 `ansgo_backup`，升级脚本会为存量 Docker 部署自动补上挂载，容器重建后仍保留；**v1.6.1 及更早版本**该目录不在持久卷中，升级重建会丢失。宿主 `/etc/ansgo-backup/docker-*.tar.gz` 是 Docker 升级器的自动回滚归档，与容器内日常备份不同。完整命令表、故障排查和卸载说明见根目录 README。
 
 </details>
 

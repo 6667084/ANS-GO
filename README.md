@@ -115,8 +115,8 @@ systemctl disable --now ansgo-autoupgrade.timer
 | 恢复日常备份 | `ansgo-admin restore /etc/ansgo-backup/<CATEGORY>-<TIMESTAMP>.tar.gz` |
 | 查看升级日志 | `tail -n 200 /var/log/ansgo/upgrade.log` |
 | 升级 | `ansgo-admin upgrade --yes` |
-| 卸载（保留配置） | `bash install.sh --uninstall` |
-| 彻底卸载 | `bash install.sh --uninstall --purge` |
+| 卸载（保留配置） | 使用下方“卸载”中的在线命令。 |
+| 彻底卸载 | 使用下方“卸载”中的在线命令并追加 `--purge`。 |
 
 </details>
 
@@ -143,10 +143,10 @@ systemctl disable --now ansgo-autoupgrade.timer
 | 恢复容器内日常备份 | `docker exec -it ansgo ansgo-admin restore /etc/ansgo-backup/<CATEGORY>-<TIMESTAMP>.tar.gz` |
 | 查看宿主升级备份 | `ls -lt /etc/ansgo-backup/docker-*.tar.gz` |
 | 升级 | 执行上方“一键升级”命令（必须在宿主机）。 |
-| 卸载（保留卷） | `bash install.sh --uninstall` |
-| 彻底卸载（删除卷、镜像及配置） | `bash install.sh --uninstall --purge` |
+| 卸载（保留卷） | 使用下方“卸载”中的在线命令。 |
+| 彻底卸载（删除卷、镜像及配置） | 使用下方“卸载”中的在线命令并追加 `--purge`。 |
 
-`ansgo-admin backup` 的归档位于容器持久卷内的 `/etc/ansgo-backup/`；统一升级器创建的 `docker-*.tar.gz` 位于**宿主机** `/etc/ansgo-backup/`，用于升级自动回滚，不能和容器内日常备份混为一谈。
+容器内 `ansgo-admin backup` 的归档位于 `/etc/ansgo-backup/`。自 **v1.6.2** 起，该目录挂载为命名卷 `ansgo_backup`，升级脚本会为存量部署自动补上挂载，容器重建后仍保留；**v1.6.1 及更早版本**该目录不在持久卷中，升级重建会丢失。统一升级器创建的 `docker-*.tar.gz` 位于**宿主机** `/etc/ansgo-backup/`，用于升级自动回滚，不能和容器内日常备份混为一谈。
 
 </details>
 
@@ -275,6 +275,8 @@ tail -n 200 /var/log/ansgo/upgrade.log
 ls -lt /etc/ansgo-backup/docker-*.tar.gz
 ```
 
+容器内 `ansgo-admin backup` 的归档位于 `/etc/ansgo-backup/`。自 **v1.6.2** 起，该目录是命名卷 `ansgo_backup`，升级脚本会为存量 Docker 部署自动补齐挂载，容器重建后仍保留；**v1.6.1 及更早版本**该目录不持久化，升级重建会丢失。宿主 `/etc/ansgo-backup/docker-*.tar.gz` 是统一升级器的回滚归档，与容器内日常备份不同。
+
 恢复命令仅接受含 `manifest.json` 的归档。升级器的 Docker 归档用于自动回滚；常规人工恢复优先使用容器内 `ansgo-admin backup` 创建的归档。
 
 </details>
@@ -284,10 +286,10 @@ ls -lt /etc/ansgo-backup/docker-*.tar.gz
 
 ```bash
 # 自动识别裸金属 / Docker，保留配置、证书与 Docker 卷
-bash install.sh --uninstall
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh | bash -s -- --uninstall
 
 # 彻底删除配置、密钥、证书、备份、相关卷、镜像和受管调优文件
-bash install.sh --uninstall --purge
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh | bash -s -- --uninstall --purge
 ```
 
 卸载必须在终端中输入 `yes` 确认；无 TTY 的 CI 或自动化环境不能安全替代人工确认。Docker 用户在宿主机执行，默认保留 `/etc/ansgo-docker/` 和数据卷，`--purge` 才删除。
