@@ -16,6 +16,14 @@ CERTDIR="$ROOT/etc/ssl/ansgo"
 BACKUP_ROOT="$ROOT/etc/ansgo-backup"
 LIB="${ANSGO_LIB:-/usr/local/bin/ansgo-limits}"
 [ -f "$LIB" ] || LIB="$(dirname "${BASH_SOURCE[0]}")/ansgo-limits"
+if [ ! -f "$LIB" ]; then
+  # 兼容旧版安装器/旧部署：只拿到了本脚本、没装共享库 ansgo-limits 时自动补装
+  LIB=/usr/local/bin/ansgo-limits
+  _lib_tmp=$(mktemp) && curl -fsSL --max-time 30 "${ANSGO_RAW_BASE:-https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy}/ansgo-limits" -o "$_lib_tmp" \
+    && bash -n "$_lib_tmp" && install -m 755 "$_lib_tmp" "$LIB"
+  rm -f "$_lib_tmp"
+fi
+[ -f "$LIB" ] || { echo "[X] 缺少 $LIB，请执行一键升级：curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh | bash" >&2; exit 1; }
 source "$LIB" || exit 1
 BVPANEL="$ROOT/usr/local/bin/ansgo-panel"
 DOMAIN_DEF="example.com"
