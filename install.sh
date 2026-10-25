@@ -872,19 +872,19 @@ do_uninstall(){
       # 再次兑底：compose down 可能因 project 名不一致而遗漏
       docker rm -f ansgo 2>/dev/null || true
       if [ "$PURGE" = 1 ]; then
-        log "[Docker] 删除数据卷（配置/密钥/证书/acme）..."
+        log "[Docker] 删除数据卷（配置/密钥/证书/acme/日常备份）..."
         ( cd /etc/ansgo-docker && docker compose down -v --remove-orphans 2>/dev/null \
           || docker-compose down -v 2>/dev/null || true )
         # 兑底删除可能残留的卷（compose project 名不同时）；按名称模式匹配，
         # 覆盖 ansgo_* / ansgo-docker_ansgo_* / 自定义 project 名的卷
         docker volume ls --format '{{.Name}}' 2>/dev/null \
-          | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme)$|_ansgo_(etc|ssl|caddy|sb|acme)$' \
+          | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme|backup)$|_ansgo_(etc|ssl|caddy|sb|acme|backup)$' \
           | xargs -r docker volume rm 2>/dev/null || true
       fi
     else
       warn "[Docker] docker 命令缺失或 compose 文件不在，已尝试手动清理容器"
       [ "$PURGE" = 1 ] && docker volume ls --format '{{.Name}}' 2>/dev/null \
-        | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme)$|_ansgo_(etc|ssl|caddy|sb|acme)$' \
+        | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme|backup)$|_ansgo_(etc|ssl|caddy|sb|acme|backup)$' \
         | xargs -r docker volume rm 2>/dev/null || true
     fi
     if [ "$PURGE" = 1 ]; then

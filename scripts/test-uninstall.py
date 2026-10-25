@@ -53,6 +53,14 @@ elif a[:2] == ["image","rm"]:
     assert all(t.rsplit(":",1)[0] in ("ghcr.io/6667084/ansgo","ghcr.io/jiasongji/ansgo") for t in image["tags"])
     assert not image.get("digests")
     s["images"].remove(image); p.write_text(json.dumps(s))
+elif a[:2] == ["volume","ls"]:
+    print("\n".join(s["volumes"]))
+elif a[:2] == ["volume","rm"]:
+    assert len(a) > 2, a
+    for name in a[2:]:
+        assert name in s["project_volumes"], a
+        s["volumes"].remove(name)
+    p.write_text(json.dumps(s))
 elif a[0] not in ("compose","rm","volume"): raise AssertionError(a)
 '''
 
@@ -85,7 +93,11 @@ def run(mode, piped, purge, provenance="managed"):
             dict(id=ids["used"], tags=["ghcr.io/6667084/ansgo:used"],used=True),
         ]
         state = pathlib.Path(tmp) / "images.json"
-        state.write_text(json.dumps(dict(images=images,calls=[])))
+        project_volumes = ["ansgo_backup", "ansgo-docker_ansgo_backup", "custom_ansgo_backup", "ansgo_etc"]
+        other_volumes = ["unrelated_backup", "ansgo_backup_extra", "ansgo_backup_other", "other_volume"]
+        state.write_text(json.dumps(dict(images=images, calls=[],
+                                        volumes=project_volumes+other_volumes,
+                                        project_volumes=project_volumes)))
         calls = pathlib.Path(tmp) / "system-calls"
         source = re.sub(r"/(?:etc|var|usr/local/bin|root)/", lambda m: str(root) + m[0], original)
         source = re.sub(r"^readtty\(\)\{.*?^\}", "readtty(){ printf yes; }",
@@ -153,6 +165,8 @@ def run(mode, piped, purge, provenance="managed"):
         assert set(removed) == ({ids["current"],ids["old"]} if mode=="docker" and purge else set()), (
             removed, result.stdout, result.stderr, final["calls"])
         assert not any("prune" in a for a in final["calls"])
+        expected_volumes = other_volumes if mode == "docker" and purge else project_volumes+other_volumes
+        assert final["volumes"] == expected_volumes, (mode,piped,purge,final["calls"],final["volumes"])
         print(f"PASS uninstall: {mode}, bootstrap={piped}, purge={purge}, tuning={provenance}")
 
 
@@ -162,4 +176,4 @@ for mode in ("metal","docker","residue","tuning-only"):
             run(mode,piped,purge)
 for provenance in ("user","near-match","compacted","late-marker","other-marker","symlink"):
     run("docker",False,True,provenance)
-print("ALL UNINSTALL TESTS PASSED: 双仓库全版本/多标签、无关镜像与引用保护、跨形态受管调优清理、用户文件/软链保留")
+print("ALL UNINSTALL TESTS PASSED: 日常备份卷默认保留/purge 清理（含自定义项目前缀）；无关卷保护；双仓库全版本/多标签、引用保护、受管调优清理、用户文件/软链保留")
