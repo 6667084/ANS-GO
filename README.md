@@ -20,6 +20,26 @@ curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
 ```
 
 ```bash
+# 带常用参数的一键部署：端口、面板账号/路径/标题、Naive 用户名与伪装站一次指定
+# 未写的端口与凭证随机生成；已有 nginx/宝塔占用 :80/:443 时保留 --no-caddy，否则删掉该行
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com \
+             --dynu-key <DYNU_API_KEY> \
+             --email <EMAIL> \
+             --anytls-port <ANYTLS_PORT> \
+             --naive-port <NAIVE_PORT> \
+             --naive-user <NAIVE_USER> \
+             --ss-port <SS_PORT> \
+             --disguise-naive proxy:https://example.com \
+             --panel-port <PANEL_PORT> \
+             --panel-user <PANEL_USER> \
+             --panel-url-path /<PANEL_PATH>/ \
+             --panel-title <NODE_NAME> \
+             --non-interactive \
+             --no-caddy
+```
+
+```bash
 # 交互安装：首次使用推荐
 bash <(curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh)
 ```
@@ -33,6 +53,27 @@ bash <(curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.
 curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
   | bash -s -- --domain your-domain.com --dynu-key <DYNU_API_KEY> \
       --email <EMAIL> --docker --non-interactive
+```
+
+```bash
+# 带常用参数的一键部署（与裸金属相同，仅多 --docker）
+# 未写的端口与凭证随机生成；已有 nginx/宝塔占用 :80/:443 时保留 --no-caddy，否则删掉该行
+curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
+  | bash -s -- --domain your-domain.com \
+             --dynu-key <DYNU_API_KEY> \
+             --email <EMAIL> \
+             --anytls-port <ANYTLS_PORT> \
+             --naive-port <NAIVE_PORT> \
+             --naive-user <NAIVE_USER> \
+             --ss-port <SS_PORT> \
+             --disguise-naive proxy:https://example.com \
+             --panel-port <PANEL_PORT> \
+             --panel-user <PANEL_USER> \
+             --panel-url-path /<PANEL_PATH>/ \
+             --panel-title <NODE_NAME> \
+             --docker \
+             --non-interactive \
+             --no-caddy
 ```
 
 ```bash
