@@ -32,7 +32,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(405)
             return
         body = b"fixture"
-        if self.path == "/api/v1.6.1":
+        if self.path == "/api/v1.6.2":
             body = json.dumps({"assets": [{"name": "ansgo-panel-linux-amd64"}]}).encode()
         if self.path == "/raw/docker-compose.yml":
             body = (PROJECT / "deploy/docker-compose.yml").read_bytes()
@@ -58,11 +58,11 @@ try:
         root = Path(temp)
         env = {**os.environ, "ANSGO_RAW_BASE": base + "/raw/",
                "ANSGO_REL_BASE": base + "/rel/", "ANSGO_RELEASE_API": base + "/api/"}
-        setup = 'REPO=6667084/ANS-GO\nVER=v1.6.1\nAARCH=amd64\nDOCKER=1\n'
+        setup = 'REPO=6667084/ANS-GO\nVER=v1.6.2\nAARCH=amd64\nDOCKER=1\n'
         install_sources = re.search(r'^RAW=.*?^VER=.*$', install, re.M | re.S)[0].split("\n# 架构映射", 1)[0]
         upgrade_sources = upgrade.split('RAW="${ANSGO_RAW_BASE:', 1)[1].split('\nif [ "$YES"', 1)[0]
         upgrade_sources = 'RAW="${ANSGO_RAW_BASE:' + upgrade_sources
-        for text, expected_rel in [(install_sources, base + "/rel"), (upgrade_sources, base + "/rel/v1.6.1")]:
+        for text, expected_rel in [(install_sources, base + "/rel"), (upgrade_sources, base + "/rel/v1.6.2")]:
             script = setup + text + '\nprintf "%s\\n" "$RAW" "$REL" "$RELEASE_API"\n'
             out = subprocess.check_output(["bash", "-eu", "-c", script], env=env, text=True)
             assert out.splitlines() == [base + "/raw", expected_rel, base + "/api"], out
@@ -98,8 +98,8 @@ try:
         script = setup + install_sources + "\n" + functions + '\nWORK="$1"\nerr(){ echo "$*" >&2; }\ndl_or_exit(){ dl "$1" "$2"; }\nansgo_preflight_assets'
         result = subprocess.run(["bash", "-eu", "-c", script, "_", temp], env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
-        assert ("GET", "/api/v1.6.1", None) in requests
-        assert any(p == "/rel/v1.6.1/ansgo-panel-linux-amd64" and method == "HEAD" for method, p, _ in requests)
+        assert ("GET", "/api/v1.6.2", None) in requests
+        assert any(p == "/rel/v1.6.2/ansgo-panel-linux-amd64" and method == "HEAD" for method, p, _ in requests)
         assert ("GET", "/raw/ansgo-genconf", "bytes=0-0") in requests
         assert any(p == "/raw/docker-compose.yml" for _, p, _ in requests)
         print("PASS sources: install/upgrade 动态环境覆盖、release JSON、HEAD 失败后 Range 兜底")
@@ -117,7 +117,7 @@ try:
             path.write_text("#!/bin/sh\n" + body + "\n")
             path.chmod(0o700)
         env.update(PATH=str(probes) + os.pathsep + os.environ["PATH"], TEST_MUTATION=str(sentinel))
-        for asset in ("/api/v1.6.1", "/rel/v1.6.1/ansgo-panel-linux-amd64", "/raw/ansgo-admin"):
+        for asset in ("/api/v1.6.2", "/rel/v1.6.2/ansgo-panel-linux-amd64", "/raw/ansgo-admin"):
             missing.add(asset)
             result = subprocess.run(["bash", str(PROJECT / "install.sh"), "--non-interactive",
                                      "--domain", "your-domain.com", "--dynu-key", "example-key"],

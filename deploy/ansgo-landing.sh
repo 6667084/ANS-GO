@@ -41,7 +41,7 @@ command -v curl >/dev/null || { apt-get update && apt-get install -y --no-instal
 
 # 装 sing-box（若未装）
 if ! command -v sing-box >/dev/null; then
-  REPO="6667084/ANS-GO"; VER="v1.6.1"
+  REPO="6667084/ANS-GO"; VER="v1.6.2"
   AARCH=$(uname -m); AARCH="${AARCH/x86_64/amd64}"; AARCH="${AARCH/aarch64/arm64}"
   log "下载 sing-box (from release, arch=$AARCH)"
   curl -fsSL "https://github.com/${REPO}/releases/download/${VER}/sing-box-linux-${AARCH}.tar.gz" -o "$WORK/sb.tgz" || { err "下载失败"; exit 1; }
@@ -91,7 +91,7 @@ WantedBy=multi-user.target
 EOF
 
 if [ ! -f /usr/local/bin/ansgo-limits ]; then
-  curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/v1.6.1/deploy/ansgo-limits -o "$WORK/ansgo-limits"
+  curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/v1.6.2/deploy/ansgo-limits -o "$WORK/ansgo-limits"
   install -m 755 "$WORK/ansgo-limits" /usr/local/bin/ansgo-limits
 fi
 /usr/local/bin/ansgo-limits

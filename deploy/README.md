@@ -2,7 +2,7 @@
 
 这里是安装、升级、离线管理和 systemd / Docker 部署资源。服务器部署教程与完整命令表以仓库根目录 [README](../README.md) 为准；本文件只说明部署资源和两种形态的对应入口。
 
-当前发布版本为 **v1.6.1**。Release 包含面板、caddy-naive、sing-box 的 amd64 / arm64 资产和 `SHA256SUMS`；Docker 镜像为 `ghcr.io/6667084/ansgo:v1.6.1` 与 `latest`。
+当前发布版本为 **v1.6.2**。Release 包含面板、caddy-naive、sing-box 的 amd64 / arm64 资产和 `SHA256SUMS`；Docker 镜像为 `ghcr.io/6667084/ansgo:v1.6.2` 与 `latest`。
 
 ## 文件清单
 

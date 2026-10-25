@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ANS-GO 一键部署脚本 (install.sh)   v1.6.1
+# ANS-GO 一键部署脚本 (install.sh)   v1.6.2
 #   交互式：bash install.sh          （主菜单：安装/卸载/彻底卸载/落地）
 #   带参数：bash install.sh --domain ... --dynu-key ... --non-interactive
 #   Docker：bash install.sh --domain ... --docker --non-interactive
@@ -8,7 +8,7 @@
 #           bash install.sh --uninstall --purge   # 彻底删除配置/卷/镜像
 #
 # 所有资源取自本仓库 GitHub / 官方上游：
-#   脚本/源码    -> raw.githubusercontent.com/6667084/ANS-GO/v1.6.1/deploy/
+#   脚本/源码    -> raw.githubusercontent.com/6667084/ANS-GO/v1.6.2/deploy/
 #   面板二进制    -> github.com/6667084/ANS-GO/releases/download/$VER/ansgo-panel-linux-<arch>
 #   sing-box      -> SagerNet 官方 release（多架构）
 #   caddy(naive) -> klzgrad/forwardproxy 源码 + xcaddy 编译（Docker 内）或本项目预编译产物
@@ -86,13 +86,13 @@ readtty(){ # 从 /dev/tty 读一行（curl|bash 下 stdin 被管道占用时的�
 }
 
 REPO="6667084/ANS-GO"
-RAW="${ANSGO_RAW_BASE:-https://raw.githubusercontent.com/${REPO}/v1.6.1/deploy}"
+RAW="${ANSGO_RAW_BASE:-https://raw.githubusercontent.com/${REPO}/v1.6.2/deploy}"
 RAW="${RAW%/}"
 REL="${ANSGO_REL_BASE:-https://github.com/${REPO}/releases/download}"
 REL="${REL%/}"
 RELEASE_API="${ANSGO_RELEASE_API:-https://api.github.com/repos/${REPO}/releases/tags}"
 RELEASE_API="${RELEASE_API%/}"
-VER="v1.6.1"         # 面板二进制 release tag（install.sh 脚本本体 v1.6.0：--panel-title/--server-ip 安装参数 + ACME 引导精简）
+VER="v1.6.2"         # 面板二进制 release tag（install.sh 脚本本体 v1.6.0：--panel-title/--server-ip 安装参数 + ACME 引导精简）
 # 架构映射（uname -m -> 下载用后缀）；用 case 避免关联数组在 set -u 下的 unbound variable 陷阱
 ARCH="$(uname -m)"
 case "$ARCH" in

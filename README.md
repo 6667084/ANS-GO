@@ -2,9 +2,9 @@
 
 在低配 VPS 上部署 Shadowsocks、AnyTLS、SOCKS5、NaiveProxy 与 Go Web 管理面板。支持裸金属 systemd 与 Docker 一体化部署，共享一张证书，并提供可恢复升级、离线管理和多落地服务。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/latest_release-v1.6.1-blue) ![license](https://img.shields.io/badge/license-MIT-blue)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/latest_release-v1.6.2-blue) ![license](https://img.shields.io/badge/license-MIT-blue)
 
-> 所有命令默认以 `root` 执行；非 root 用户请加 `sudo`。`<...>` 是需替换的占位符。当前稳定版为 **v1.6.1**，Release 提供 6 项资产、`SHA256SUMS` 与 `ghcr.io/6667084/ansgo:v1.6.1` / `latest` 多架构镜像。
+> 所有命令默认以 `root` 执行；非 root 用户请加 `sudo`。`<...>` 是需替换的占位符。当前稳定版为 **v1.6.2**，Release 提供 6 项资产、`SHA256SUMS` 与 `ghcr.io/6667084/ansgo:v1.6.2` / `latest` 多架构镜像。
 
 ## 🚀 一键安装
 
@@ -79,8 +79,8 @@ curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.
 
 ```bash
 # 已安装升级器：指定部署形态或版本
-/usr/local/bin/ansgo-upgrade --metal --yes --ver v1.6.1
-/usr/local/bin/ansgo-upgrade --docker --yes --ver v1.6.1
+/usr/local/bin/ansgo-upgrade --metal --yes --ver v1.6.2
+/usr/local/bin/ansgo-upgrade --docker --yes --ver v1.6.2
 
 # 仅裸金属：自动升级 timer 默认关闭
 systemctl enable --now ansgo-autoupgrade.timer
@@ -356,6 +356,14 @@ ANS-GO/
 
 <details>
 <summary>版本历史</summary>
+
+### v1.6.2
+
+- 面板「忘记密码」等 SSH 兜底提示区分部署形态：登录页同时列出裸金属与 Docker（`docker exec -it ansgo ansgo-admin panel-pass`）命令，登录后按实际形态显示。
+- Docker 日常备份目录 `/etc/ansgo-backup` 改为命名卷 `ansgo_backup`，容器重建/升级后不再丢失；升级脚本自动为存量部署补挂载。
+- README 按裸金属 / Docker 分开教程与常用命令，默认只展开核心一键命令。
+
+详见 [v1.6.2 release notes](docs/release-v1.6.2.md)。
 
 ### v1.6.1
 
