@@ -79,7 +79,7 @@ stop_svc(){ local s="$1"; systemctl stop "$s" 2>/dev/null && ok "已 stop $s" ||
 _restart_after_restore_failure(){
   local list="$1" svc rc=0
   for svc in caddy sing-box ansgo-panel; do
-    printf '%s\n' "$list" | grep -qx "$svc" || continue
+    printf '%s\n' "$list" | grep -x "$svc" >/dev/null || continue
     systemctl reset-failed "$svc" 2>/dev/null || true
     if systemctl restart "$svc" && systemctl is-active --quiet "$svc"; then
       ok "已恢复原运行服务 $svc"
@@ -207,10 +207,10 @@ PYSECRET
 gen_ss_key(){ openssl rand -base64 16; }
 gen_anytls_pass(){ openssl rand -hex 16; }
 gen_naive_user(){ openssl rand -hex 6; }
-gen_naive_pass(){ openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20; }
+gen_naive_pass(){ openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c 1-20; }
 gen_socks_user(){ openssl rand -hex 6; }
-gen_socks_pass(){ openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20; }
-gen_panel_pass(){ openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 22; }
+gen_socks_pass(){ openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c 1-20; }
+gen_panel_pass(){ openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c 1-22; }
 
 # ---------- URI 生成 ----------
 print_uris(){
@@ -519,7 +519,7 @@ PYMANIFEST
     fi
     # 与开机语义一致，恢复所有原启用载体；单个失败不阻止其余服务恢复，但整体返回非零。
     for svc in caddy sing-box ansgo-panel; do
-      printf '%s\n' "$was_enabled" | grep -qx "$svc" || continue
+      printf '%s\n' "$was_enabled" | grep -x "$svc" >/dev/null || continue
       [ "$rc" = 0 ] || break
       restart_svc "$svc" || rc=1
     done

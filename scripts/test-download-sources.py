@@ -34,6 +34,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = b"fixture"
         if self.path == "/api/v1.6.0":
             body = json.dumps({"assets": [{"name": "ansgo-panel-linux-amd64"}]}).encode()
+        if self.path == "/raw/docker-compose.yml":
+            body = (PROJECT / "deploy/docker-compose.yml").read_bytes()
         self.send_response(206 if self.headers.get("Range") else 200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -91,7 +93,8 @@ try:
                                           env={**env, **entries}, text=True)
             assert out == value, (value, out)
         print("PASS secrets transport: 安装参数 -> compose 安全编码 -> entrypoint 逐字还原四类特殊密码")
-        functions = "\n".join(fn(install, name) for name in ("dl", "ansgo_asset_probe", "ansgo_preflight_assets"))
+        functions = "\n".join(fn(install, name) for name in (
+            "dl", "ansgo_asset_probe", "ansgo_compose_v2_hint", "ansgo_compose_check", "ansgo_preflight_assets"))
         script = setup + install_sources + "\n" + functions + '\nWORK="$1"\nerr(){ echo "$*" >&2; }\ndl_or_exit(){ dl "$1" "$2"; }\nansgo_preflight_assets'
         result = subprocess.run(["bash", "-eu", "-c", script, "_", temp], env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
@@ -123,6 +126,52 @@ try:
             assert not sentinel.exists(), "预检失败前修改了宿主"
             missing.clear()
         print("PASS preflight: 完整安装入口遇 panel/raw 404 均中止，未调用任何宿主修改命令")
+
+        # v1 拒绝 cgroup 等模板字段时，安装入口必须在 apt/调优/写配置之前给出 v2 指引。
+        calls = root / "compose-calls"
+        env["TEST_COMPOSE_CALLS"] = str(calls)
+        docker = probes / "docker"
+        docker.write_text('#!/bin/sh\nif [ "$1 $2" = "compose version" ]; then exit 1; fi\n'
+                          'printf "%s\\n" "$*" >> "$TEST_MUTATION"\nexit 99\n')
+        compose = probes / "docker-compose"
+        compose.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_COMPOSE_CALLS"\n'
+                           'echo "Unsupported config option: cgroup" >&2\nexit 1\n')
+        compose.chmod(0o700)
+        result = subprocess.run(
+            ["bash", str(PROJECT / "install.sh"), "--docker", "--non-interactive",
+             "--domain", "your-domain.com", "--dynu-key", "example-key"],
+            env=env, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 3 and not sentinel.exists(), result.stdout + result.stderr
+        assert "config --quiet" in calls.read_text()
+        for hint in ("需要 Docker Compose v2（docker compose 子命令）",
+                     "apt-get install -y docker-compose-plugin",
+                     "/usr/local/lib/docker/cli-plugins/docker-compose"):
+            assert hint in result.stderr, hint
+        print("PASS Compose v1 install: 完整入口在任何宿主修改前预检模板，拒绝时给出插件/官方源/静态安装指引")
+
+        # 升级入口也必须先检查 v1，不能先创建日志/锁或修复备份权限。
+        sandbox = root / "upgrade-root"
+        conf = sandbox / "etc/ansgo-docker/docker-compose.yml"
+        conf.parent.mkdir(parents=True)
+        conf.write_bytes((PROJECT / "deploy/docker-compose.yml").read_bytes())
+        upgraded = re.sub(r"/(?:etc|var|usr/local/bin|root)/",
+                          lambda m: str(sandbox) + m[0], upgrade)
+        upgrade_file = root / "upgrade.sh"
+        upgrade_file.write_text(upgraded)
+        before = conf.read_bytes()
+        for valid_config in (False, True):
+            if valid_config:
+                compose.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_COMPOSE_CALLS"\n'
+                                   'case "$*" in *"config --quiet") exit 0;; esac\n'
+                                   'echo "Usage: docker-compose config"\n')
+            result = subprocess.run(["bash", str(upgrade_file), "--docker", "--yes"],
+                                    env=env, capture_output=True, text=True, timeout=20)
+            assert result.returncode != 0 and not sentinel.exists(), result.stdout + result.stderr
+            assert "需要 Docker Compose v2（docker compose 子命令）" in result.stderr
+            assert "apt-get install -y docker-compose-plugin" in result.stderr
+            assert conf.read_bytes() == before
+            assert not (sandbox / "var").exists()
+        print("PASS Compose v1 upgrade: 不兼容模板或缺少 JSON 输出能力均在宿主写入前退出")
 finally:
     server.shutdown()
     server.server_close()

@@ -49,6 +49,41 @@ done
 [ "$(id -u)" = 0 ] || { echo '升级需要 root' >&2; exit 1; }
 case "$(uname -m)" in x86_64) AARCH=amd64;; aarch64|arm64) AARCH=arm64;; *) echo '架构不支持' >&2; exit 1;; esac
 command -v python3 >/dev/null
+# Compose 兼容性必须在日志、锁文件、备份权限修复等宿主写入之前检查。
+docker_compose_v2_hint(){
+  echo '需要 Docker Compose v2（docker compose 子命令）' >&2
+  echo 'Debian/Ubuntu: apt-get install -y docker-compose-plugin（软件源无此包时先配置 Docker 官方源）' >&2
+  echo '也可安装官方静态插件：mkdir -p /usr/local/lib/docker/cli-plugins' >&2
+  echo "curl -fL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m) -o /usr/local/lib/docker/cli-plugins/docker-compose && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose" >&2
+}
+docker_compose_preflight(){
+  if docker compose version >/dev/null 2>&1; then COMPOSE=(docker compose)
+  elif command -v docker-compose >/dev/null; then
+    COMPOSE=(docker-compose)
+    if ! "${COMPOSE[@]}" -f "$COMPOSE_FILE" config --quiet >/dev/null 2>&1; then
+      docker_compose_v2_hint; return 1
+    fi
+    # 后续只在内存解析 JSON；旧 v1 即使接受原文件，也不能支持此升级流程。
+    "${COMPOSE[@]}" config --help 2>/dev/null | grep -F -- '--format' >/dev/null || {
+      docker_compose_v2_hint; return 1;
+    }
+  else docker_compose_v2_hint; return 1; fi
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" config --quiet >/dev/null 2>&1 || {
+    echo 'Docker Compose 配置预检失败，请检查 compose 与环境文件' >&2; return 1;
+  }
+}
+if [ -z "$MODE" ]; then
+  if [ -f "$COMPOSE_FILE" ] && [ -f /etc/ansgo/panel.json ]; then
+    echo '同时检测到裸金属和 Docker，请指定 --metal/--docker' >&2; exit 1
+  elif [ -f "$COMPOSE_FILE" ]; then MODE=docker
+  elif [ -f /etc/ansgo/panel.json ]; then MODE=metal
+  else echo '未检测到已安装的 ANS-GO' >&2; exit 1; fi
+fi
+COMPOSE=()
+if [ "$MODE" = docker ]; then
+  [ "$AUTO" = 0 ] || { echo 'Docker 自动升级请在宿主安排，容器内 timer 不支持' >&2; exit 1; }
+  docker_compose_preflight || exit 1
+fi
 mkdir -p /var/log/ansgo /var/lib/ansgo /usr/local/bin
 chmod 700 /var/log/ansgo /var/lib/ansgo
 # 跨 CLI/timer/API 防止并行升级。锁 fd 不能传给重启后的服务。
@@ -97,8 +132,8 @@ finish(){
       restore_rc=$?
       systemctl daemon-reload
       for svc in caddy sing-box ansgo-panel; do
-        if printf "%s\n" "${OLD_ENABLED[@]:-}" | grep -qx "$svc"; then systemctl enable "$svc" || restore_rc=1; else systemctl disable "$svc" || restore_rc=1; fi
-        if printf "%s\n" "${OLD_ACTIVE[@]:-}" | grep -qx "$svc"; then
+        if printf "%s\n" "${OLD_ENABLED[@]:-}" | grep -x "$svc" >/dev/null; then systemctl enable "$svc" || restore_rc=1; else systemctl disable "$svc" || restore_rc=1; fi
+        if printf "%s\n" "${OLD_ACTIVE[@]:-}" | grep -x "$svc" >/dev/null; then
           systemctl reset-failed "$svc" 2>/dev/null || true
           systemctl restart "$svc" && systemctl is-active --quiet "$svc" || restore_rc=1
         fi
@@ -113,7 +148,7 @@ finish(){
     docker exec "$CID" systemctl start ansgo-panel cron || true
   fi
   if [ "$rc" -ne 0 ] && [ "$METAL_PAUSED" = 1 ] && [ "$MUTATED" = 0 ]; then
-    if printf '%s\n' "${OLD_ACTIVE[@]:-}" | grep -qx ansgo-panel; then
+    if printf '%s\n' "${OLD_ACTIVE[@]:-}" | grep -x ansgo-panel >/dev/null; then
       systemctl reset-failed ansgo-panel 2>/dev/null || true
       systemctl start ansgo-panel || true
     fi
@@ -133,21 +168,6 @@ finish(){
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-# 自动检测不可把混合部署猜成一种模式。
-if [ -z "$MODE" ]; then
-  if [ -f "$COMPOSE_FILE" ] && [ -f /etc/ansgo/panel.json ]; then
-    say '同时检测到裸金属和 Docker，请指定 --metal/--docker'; exit 1
-  elif [ -f "$COMPOSE_FILE" ]; then MODE=docker
-  elif [ -f /etc/ansgo/panel.json ]; then MODE=metal
-  else say '未检测到已安装的 ANS-GO'; exit 1; fi
-fi
-COMPOSE=()
-if [ "$MODE" = docker ]; then
-  [ "$AUTO" = 0 ] || { say 'Docker 自动升级请在宿主安排，容器内 timer 不支持'; exit 1; }
-  if docker compose version >/dev/null 2>&1; then COMPOSE=(docker compose)
-  elif command -v docker-compose >/dev/null; then COMPOSE=(docker-compose)
-  else say '未找到 compose'; exit 1; fi
-fi
 current_version(){
   if [ "$MODE" = docker ]; then
     docker exec "$CID" cat /usr/local/share/ansgo-version
@@ -309,7 +329,7 @@ PY
   [ "${#sb_bins[@]}" = 1 ]
   mv "${sb_bins[0]}" "$STAGE/sing-box"
   for f in ansgo-panel sing-box caddy; do verify_elf "$STAGE/$f" "$([ "$f" != ansgo-panel ] || printf '%s' "$VER")"; chmod 755 "$STAGE/$f"; done
-  "$STAGE/caddy" list-modules | grep -Fq 'http.handlers.forward_proxy'
+  "$STAGE/caddy" list-modules | grep -F 'http.handlers.forward_proxy' >/dev/null
   "$STAGE/sing-box" version
   # 全部下载校验完成后才备份和切换。记录运行状态供失败恢复。
   OLD_ACTIVE=()
@@ -348,7 +368,7 @@ PY
   mapfile -t needed < <(active_services)
   [ "${#needed[@]}" -gt 0 ]
   for f in caddy sing-box; do
-    if ! printf '%s\n' "${needed[@]}" | grep -qx "$f"; then
+    if ! printf '%s\n' "${needed[@]}" | grep -x "$f" >/dev/null; then
       systemctl stop "$f"
       systemctl disable "$f"
     fi
@@ -395,7 +415,7 @@ PY
   BACKUP="/etc/ansgo-backup/docker-$(date +%Y%m%d-%H%M%S)-$$.tar.gz"
   tar czf "$BACKUP" -C "$STAGE/docker" .
   chmod 600 "$BACKUP"
-  tar tzf "$BACKUP" | grep -Eq '^\.?/?files/etc/ansgo/panel.json$'
+  tar tzf "$BACKUP" | grep -E '^\.?/?files/etc/ansgo/panel.json$' >/dev/null
 }
 docker_rollback(){
   local dest type name source

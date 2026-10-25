@@ -54,6 +54,47 @@ project, tmp = map(pathlib.Path, sys.argv[1:])
 script = (project/'deploy/upgrade.sh').read_text()
 def fn(name):
     return re.search(r'^'+name+r'\(\).*?^}', script, re.M|re.S)[0]
+# 清单首项即命中，后续输出远超管道缓冲区，重复验证不会因 SIGPIPE 随机失败。
+archive = tmp/'large-backup.tar.gz'
+with tarfile.open(archive, 'w:gz') as tar:
+    for name in ['files/etc/ansgo/panel.json'] + [
+            'files/padding/%05d-' % i+'x'*120 for i in range(6000)]:
+        tar.addfile(tarfile.TarInfo(name))
+backup_check = next(line.strip() for line in fn('docker_backup').splitlines() if 'tar tzf "$BACKUP"' in line)
+check = 'BACKUP="$1"\nfor i in {1..20}; do\n'+backup_check+'\ndone'
+subprocess.run(['bash','-euo','pipefail','-c',check,'_',str(archive)],check=True)
+missing_archive = tmp/'missing-backup.tar.gz'
+with tarfile.open(missing_archive, 'w:gz') as tar: tar.addfile(tarfile.TarInfo('unrelated'))
+assert subprocess.run(['bash','-euo','pipefail','-c','BACKUP="$1"\n'+backup_check,
+                       '_',str(missing_archive)],capture_output=True).returncode != 0
+upstream_error = 'tar(){ command tar "$@"; return 7; }\nBACKUP="$1"\n'+backup_check
+assert subprocess.run(['bash','-euo','pipefail','-c',upstream_error,'_',str(archive)],
+                      capture_output=True).returncode == 7
+module_dir = tmp/'modules'; module_dir.mkdir()
+caddy = module_dir/'caddy'
+caddy.write_text('#!/usr/bin/env python3\nimport sys\n'
+                 'sys.stdout.write("http.handlers.forward_proxy\\n"+("other.module\\n"*100000))\n')
+caddy.chmod(0o755)
+module_check = next(line.strip() for line in script.splitlines() if '"$STAGE/caddy" list-modules |' in line)
+subprocess.run(['bash','-euo','pipefail','-c','STAGE="$1"\nfor i in {1..20}; do\n'+
+                module_check+'\ndone','_',str(module_dir)],check=True)
+for name in ('install.sh','deploy/upgrade.sh','deploy/ansgo-admin','deploy/ansgo-limits','deploy/docker/entrypoint.sh'):
+    text = (project/name).read_text().replace('\\\n','')
+    for line in text.splitlines():
+        if line.lstrip().startswith('#'): continue
+        assert not re.search(r'\|\s*(?:head\b|grep\b[^|;]*\s-[^\s]*q)', line), (name,line)
+admin = (project/'deploy/ansgo-admin').read_text()
+generators = '\n'.join(re.search(r'^'+name+r'\(\).*$',admin,re.M)[0]
+                       for name in ('gen_naive_pass','gen_socks_pass','gen_panel_pass'))
+random_check = generators + r'''
+openssl(){ python3 -c 'print("a"*1048576)'; }
+for name in gen_naive_pass gen_socks_pass gen_panel_pass; do
+  value=$("$name")
+  case "$name" in gen_panel_pass) [ "${#value}" = 22 ];; *) [ "${#value}" = 20 ];; esac
+done
+'''
+subprocess.run(['bash','-euo','pipefail','-c',random_check],check=True)
+print('PASS pipefail: 大备份清单/模块清单各 20 次无 SIGPIPE，缺项和上游失败仍拒绝，密码截取读完输入')
 # 同一可执行夹具模拟 Docker/Compose 和 df；所有写入均在临时目录。
 bin_dir = tmp/'fake-bin'
 bin_dir.mkdir()

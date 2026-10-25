@@ -191,9 +191,9 @@ SS_KEY=${SS_KEY_IN:-$(openssl rand -base64 16)}
 ANYTLS_PASS=${ANYTLS_PASS_IN:-$(openssl rand -hex 16)}
 ANYTLS_UUID=${ANYTLS_UUID_IN:-$(cat /proc/sys/kernel/random/uuid)}
 SOCKS_USER=${SOCKS_USER_IN:-$(openssl rand -hex 6)}
-SOCKS_PASS=${SOCKS_PASS_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}
+SOCKS_PASS=${SOCKS_PASS_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c 1-20)}
 NAIVE_USER=${NAIVE_USER_IN:-$(openssl rand -hex 6)}
-NAIVE_PASS=${NAIVE_PASS_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}
+NAIVE_PASS=${NAIVE_PASS_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c 1-20)}
 EOF
     chmod 600 "$SECRETS"
     log "已生成 $SECRETS"
