@@ -425,63 +425,225 @@ PY
   printf 'services:\n  ansgo:\n    image: %s\n' "$OLD_IMAGE" > "$STAGE/rollback.yml"
   "${COMPOSE[@]}" -f "$COMPOSE_FILE" -f "$STAGE/rollback.yml" up -d --force-recreate --pull never ansgo
 }
+# 解析结果只驻留内存；正式文件始终从原文编辑，不能持久化 config 的展开输出。
+docker_prepare_compose(){
+  cp -p "$COMPOSE_FILE" "$STAGE/compose.yml"
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" config --quiet
+  python3 - "$STAGE/compose.yml" "$VER" "$DOCKER_DIR" "${COMPOSE[@]}" <<'PY'
+import json, pathlib, re, subprocess, sys
+p, version, directory, *compose = sys.argv[1:]
+result = subprocess.run(compose + ['--project-directory', directory, '-f', p,
+                                  'config', '--format', 'json'],
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+cfg = json.loads(result.stdout)['services']['ansgo']
+original = pathlib.Path(p).read_text()
+lines = original.splitlines(keepends=True)
+def key(line):
+    return re.match(r'^( *)([\w-]+|"[^"\n]+"|\'[^\'\n]+\'):[ \t]*(.*?)(?:\n)?$', line)
+def section(rows, name, indent=None):
+    for i, line in enumerate(rows):
+        m = key(line)
+        if m and m[2].strip('"\'') == name and (indent is None or len(m[1]) == indent):
+            depth = len(m[1])
+            end = next((j for j in range(i+1, len(rows))
+                        if rows[j].strip() and not rows[j].lstrip().startswith('#')
+                        and (len(rows[j])-len(rows[j].lstrip()) < depth
+                             or (key(rows[j]) and len(key(rows[j])[1]) <= depth))), len(rows))
+            return i, end, m
+    return None
+services = section(lines, 'services', 0)
+assert services, 'compose 缺少 services'
+base, end, _ = services
+children = [len(m[1]) for line in lines[base+1:end] if (m := key(line))]
+assert children, 'compose 缺少服务定义'
+service = section(lines[base+1:end], 'ansgo', min(children))
+assert service, 'compose 缺少 services.ansgo'
+a, b, header = service
+start, stop = base+1+a+1, base+1+b
+block = lines[start:stop]
+source_block = block[:]
+fields = [len(m[1]) for line in block if (m := key(line))]
+assert fields, '不支持内联 ansgo 定义'
+depth = min(fields)
+pad = ' '*depth
+assert section(block, 'env_file', depth), 'compose 缺少 env_file，请先恢复外部凭据文件'
+def replace_value(rows, index, value):
+    m = key(rows[index])
+    # 行尾注释与缩进原样保留；image 的旧值允许加引号。
+    comment = re.search(r'[ \t]+#.*', m[3])
+    rows[index] = m[1]+m[2]+': '+value+(comment[0] if comment else '')+'\n'
+image = section(block, 'image', depth)
+if image:
+    replace_value(block, image[0], 'ghcr.io/6667084/ansgo:'+version)
+else:
+    block.insert(0, pad+'image: ghcr.io/6667084/ansgo:'+version+'\n')
+mem = int(next(x.split()[1] for x in open('/proc/meminfo') if x.startswith('MemTotal:')))//1024
+limit = mem*70//100 if mem <= 1024 else 512
+add = []
+for name, value in [('mem_limit', str(limit)+'m'), ('pids_limit', '512'),
+                    ('cpu_shares', '512'), ('cpus', '1.0')]:
+    if name not in cfg:
+        add.append(pad+name+': '+value+'\n')
+if 'memswap_limit' not in cfg:
+    size = int(cfg.get('mem_limit', limit*1024**2))
+    add.append(pad+'memswap_limit: '+str(size+256*1024**2)+'\n')
+logging = section(block, 'logging', depth)
+if not logging:
+    add.extend([pad+'logging:\n', pad+'  driver: json-file\n', pad+'  options:\n',
+                pad+'    max-size: "10m"\n', pad+'    max-file: "3"\n'])
+else:
+    i, j, m = logging
+    assert not m[3].split('#', 1)[0].strip(), '请将 logging 改为分行格式后升级'
+    log = block[i+1:j]
+    log_fields = [len(m[1]) for line in log if (m := key(line))]
+    ld = min(log_fields, default=depth+2)
+    lp = ' '*ld
+    driver = cfg.get('logging', {}).get('driver', 'json-file')
+    if not section(log, 'driver', ld):
+        log.insert(0, lp+'driver: '+driver+'\n')
+    if driver == 'json-file':
+        options = section(log, 'options', ld)
+        if options:
+            oi, oj, om = options
+            value = om[3].split('#', 1)[0].strip()
+            assert value in ('', '{}'), '请将 logging.options 改为分行格式后升级'
+            if value == '{}': replace_value(log, oi, '')
+            option_fields = [len(m[1]) for line in log[oi+1:oj] if (m := key(line))]
+            op = ' '*min(option_fields, default=ld+2)
+        else:
+            oi = len(log)
+            log.append(lp+'options:\n')
+            op = lp+'  '
+        for name, value in [('max-size', '10m'), ('max-file', '3')]:
+            if name not in cfg.get('logging', {}).get('options', {}):
+                log.insert(oi+1, op+name+': "'+value+'"\n')
+    block[i+1:j] = log
+if not any(v.get('target') == '/host/manual-certs' for v in cfg.get('volumes', [])):
+    volumes = section(block, 'volumes', depth)
+    if volumes:
+        i, j, m = volumes
+        value = m[3].split('#', 1)[0].strip()
+        assert value in ('', '[]'), '请将 volumes 改为分行格式后升级'
+        if value == '[]': replace_value(block, i, '')
+        vp = next((line[:line.index('-')] for line in block[i+1:j]
+                   if line.lstrip().startswith('- ')), pad+'  ')
+        block.insert(i+1, vp+'- /etc/ansgo-docker/manual-certs:/host/manual-certs:ro\n')
+    else:
+        add.extend([pad+'volumes:\n', pad+'  - /etc/ansgo-docker/manual-certs:/host/manual-certs:ro\n'])
+text = ''.join(lines[:start]+add+block+lines[stop:])
+assert section(block, 'env_file', depth), 'env_file 不得丢失'
+# 外部凭据引用与显式环境块必须逐行保留。
+for name in ('env_file', 'environment'):
+    before, after = section(source_block, name, depth), section(block, name, depth)
+    assert bool(before) == bool(after), '环境配置不得增删'
+    if before:
+        assert source_block[before[0]:before[1]] == block[after[0]:after[1]], '环境配置不得展开'
+# 包括 dotenv 解码后的值；原文已有的短值及固定证书模式枚举不能当成新泄露。
+values = [str(v) for v in cfg.get('environment', {}).values() if v is not None]
+env = pathlib.Path(directory)/'ansgo.env'
+if env.exists():
+    for line in env.read_text().splitlines():
+        if '=' in line and not line.lstrip().startswith('#'):
+            value = line.split('=', 1)[1].strip().strip('"\'')
+            values.append(value)
+assert not any(v and v not in ('manual', 'acme') and v in text and v not in original
+               for v in values), '拒绝写入展开的环境凭据'
+pathlib.Path(p).write_text(text)
+PY
+  "${COMPOSE[@]}" --project-directory "$DOCKER_DIR" -f "$STAGE/compose.yml" config --quiet
+}
+docker_available_bytes(){
+  df -Pk "$DOCKER_ROOT" | awk 'NR==2 {printf "%.0f\n", $4*1024}'
+}
+# 同 ID 若还带其它仓库标签，也不触碰。
+docker_old_images(){
+  docker image ls --no-trunc --format '{{.Repository}} {{.ID}}' |
+    python3 -c 'import sys
+keep=set(sys.argv[1:]); repos={"ghcr.io/6667084/ansgo", "ghcr.io/jiasongji/ansgo"}; images={}
+for line in sys.stdin:
+    repo, image=line.split(); images.setdefault(image,set()).add(repo)
+for image, tags in images.items():
+    if image not in keep and tags <= repos: print(image)' "$@"
+}
+docker_remove_image(){
+  local references
+  # 再核验标签、摘要引用与全部容器；多项目共用 ID 或仍被引用时不能强制删除。
+  docker image inspect --format '{"tags":{{json .RepoTags}},"digests":{{json .RepoDigests}}}' "$1" |
+    python3 -c 'import json,sys
+d=json.load(sys.stdin); refs=(d.get("tags") or [])+(d.get("digests") or [])
+repos={"ghcr.io/6667084/ansgo","ghcr.io/jiasongji/ansgo"}
+assert refs and all((r.split("@",1)[0] if "@" in r else r.rsplit(":",1)[0]) in repos for r in refs)' || return 1
+  references=$(docker ps -aq --filter "ancestor=$1") || return 1
+  [ -z "$references" ] || return 1
+  # 同一项目的 latest/版本双标签需要 force；上面的检查保护其它镜像与容器。
+  docker image rm --force "$1"
+}
+docker_check_space(){
+  # 本地已有目标镜像时无需为重复拉取预留完整镜像空间。
+  if TARGET_ID=$(docker image inspect -f '{{.Id}}' "$TARGET_IMAGE" 2>/dev/null); then return; fi
+  TARGET_ID=''
+  local size available required image candidates reclaim=0
+  size=$(docker image inspect -f '{{.Size}}' "$OLD_IMAGE")
+  [[ "$size" =~ ^[0-9]+$ ]]
+  required=$((size+200*1024*1024))
+  available=$(docker_available_bytes)
+  [[ "$available" =~ ^[0-9]+$ ]]
+  [ "$available" -lt "$required" ] || return 0
+  candidates=$(docker_old_images "$OLD_IMAGE" "$TARGET_ID")
+  while read -r image; do
+    [ -n "$image" ] || continue
+    size=$(docker image inspect -f '{{.Size}}' "$image")
+    [[ "$size" =~ ^[0-9]+$ ]]
+    reclaim=$((reclaim+size))
+  done <<< "$candidates"
+  # 连理论回收上限都不足时，不删除镜像，也不暂停容器或修改 compose。
+  if [ $((available+reclaim)) -ge "$required" ]; then
+    while read -r image; do
+      [ -n "$image" ] || continue
+      say "拉取前清理本项目旧镜像: $image"
+      docker_remove_image "$image" || say "镜像仍被引用或无法删除，保留: $image"
+      available=$(docker_available_bytes)
+      [ "$available" -lt "$required" ] || return 0
+    done <<< "$candidates"
+  fi
+  say "Docker 磁盘空间不足: $DOCKER_ROOT 可用 $((available/1024/1024))MB，估计需要 $((required/1024/1024))MB（当前镜像 + 200MB 余量）；未切换 compose 或容器"
+  say '请手动检查并释放：/etc/ansgo-backup 中过期备份、宿主日志、Docker 构建缓存及确认无用的镜像；不自动清理其它项目镜像或卷'
+  return 1
+}
+docker_cleanup_images(){
+  local image current available
+  current=$(docker inspect -f '{{.Image}}' "$CID") || return 0
+  while read -r image; do
+    [ -n "$image" ] || continue
+    docker_remove_image "$image" || say "镜像仍被引用或无法删除，保留: $image"
+  done < <(docker_old_images "$current" "$OLD_IMAGE")
+  available=$(docker_available_bytes) || return 0
+  if [[ "$available" =~ ^[0-9]+$ ]] && [ "$available" -lt $((500*1024*1024)) ] && [ "$OLD_IMAGE" != "$current" ]; then
+    while read -r image; do
+      [ "$image" = "$OLD_IMAGE" ] || continue
+      if docker_remove_image "$image"; then
+        say "为保证磁盘余量已删除旧镜像，如需回滚将重新拉取 $OLD_TAG"
+      fi
+    done < <(docker_old_images "$current")
+  fi
+}
 upgrade_docker(){
   CID=$("${COMPOSE[@]}" -f "$COMPOSE_FILE" ps -q ansgo)
   [ -n "$CID" ]
+  OLD_IMAGE=$(docker inspect -f '{{.Image}}' "$CID")
+  OLD_TAG=$(docker inspect -f '{{.Config.Image}}' "$CID")
+  TARGET_IMAGE="ghcr.io/6667084/ansgo:$VER"
+  DOCKER_ROOT=$(docker info --format '{{.DockerRootDir}}')
+  [ -n "$DOCKER_ROOT" ]
   dl "$RAW/ansgo-admin" "$STAGE/ansgo-admin"
   bash -n "$STAGE/ansgo-admin"
+  docker_prepare_compose
+  docker_check_space
   say "拉取明确版本镜像: $VER"
-  docker pull "ghcr.io/6667084/ansgo:$VER"
-  # 先备份严格的“未迁移、未改 compose”快照；解析后的配置只用于生成新 compose。
+  docker pull "$TARGET_IMAGE"
+  # 备份只收录原始 compose，不能包含 config 展开的环境变量。
   original_compose=$(mktemp "$STAGE/compose-original.XXXXXX")
   cp -p "$COMPOSE_FILE" "$original_compose"
-  # 从 compose 自身输出解析有效配置，无 YAML 依赖且不误改其它服务。
-  "${COMPOSE[@]}" -f "$COMPOSE_FILE" config > "$STAGE/compose.yml"
-  python3 - "$STAGE/compose.yml" "$VER" <<'PY'
-import re,sys
-p,version=sys.argv[1:]; lines=open(p).readlines(); start=None; end=None
-for i,line in enumerate(lines):
-    if line.rstrip()=='  ansgo:': start=i+1
-    elif start is not None and re.match(r'^  [^ ]|^[^ #]',line): end=i; break
-assert start is not None, 'compose 缺少 services.ansgo'
-end=end or len(lines); block=''.join(lines[start:end])
-block=re.sub(r'^    image:.*$', '    image: ghcr.io/6667084/ansgo:'+version,block,flags=re.M)
-assert re.search(r'^    image:',block,re.M)
-mem=int(next(x.split()[1] for x in open('/proc/meminfo') if x.startswith('MemTotal:')))//1024
-limit=mem*70//100 if mem<=1024 else 512
-def has(k): return bool(re.search(r'^    '+k+r':',block,re.M))
-add=[]
-for key,value in [('mem_limit',str(limit)+'m'),('pids_limit','512'),('cpu_shares','512'),('cpus','1.0')]:
-    if not has(key): add.append('    '+key+': '+value+'\n')
-if not has('memswap_limit'):
-    m=re.search(r'^    mem_limit:\s*(\S+)',block,re.M)
-    val=(m[1].strip('\'"') if m else str(limit)+'m').lower()
-    match=re.fullmatch(r'(\d+)([kmg]?)b?',val)
-    assert match, '无法解析用户 mem_limit'
-    n=int(match[1])*{'':1,'k':1024,'m':1024**2,'g':1024**3}[match[2]]
-    add.append('    memswap_limit: '+str(n+256*1024**2)+'\n')
-if not has('logging'):
-    add.append('    logging:\n      driver: json-file\n      options:\n        max-size: "10m"\n        max-file: "3"\n')
-else:
-    # 保留用户日志驱动，只为 json-file 独立补齐 options。
-    m=re.search(r'^    logging:\n((?:      .*\n|\n)*)',block,re.M)
-    assert m, 'logging 结构异常'
-    log=m[0]
-    if not re.search(r'^      driver:',log,re.M):
-        log=log.replace('    logging:\n','    logging:\n      driver: json-file\n',1)
-    if re.search(r'driver:\s*[\'\"]?json-file',log):
-        log=re.sub(r'^      options:[ \t]*\{\}[ \t]*$', '      options:', log, flags=re.M)
-        if not re.search(r'^      options:',log,re.M): log+='      options:\n'
-        for key,value in [('max-size','10m'),('max-file','3')]:
-            if not re.search(r'^        '+key+':',log,re.M):
-                log=re.sub(r'(^      options:\s*\n)',r'\1        '+key+': "'+value+'"\n',log,flags=re.M)
-        block=block[:m.start()]+log+block[m.end():]
-if '/host/manual-certs' not in block:
-    block=re.sub(r'(^    volumes:\s*\n)',r'\1      - type: bind\n        source: /etc/ansgo-docker/manual-certs\n        target: /host/manual-certs\n        read_only: true\n',block,flags=re.M)
-    assert '/host/manual-certs' in block, 'compose 缺少 volumes'
-open(p,'w').write(''.join(lines[:start])+''.join(add)+block+''.join(lines[end:]))
-PY
-  "${COMPOSE[@]}" --project-directory "$DOCKER_DIR" -f "$STAGE/compose.yml" config --quiet
   # 先停止写入者再快照所有实际配置/证书/acme 卷，保证 SQLite 一致。
   docker exec "$CID" systemctl stop ansgo-panel cron
   DOCKER_PAUSED=1
@@ -493,7 +655,7 @@ PY
   docker exec "$CID" bash -c 'source "$1"; ansgo_migrate /etc/ansgo/panel.json /etc/ansgo/secrets.env; rc=$?; rm -f "$1"; exit "$rc"' _ "$container_lib"
   mkdir -p "$DOCKER_DIR/manual-certs"
   chmod 700 "$DOCKER_DIR/manual-certs"
-  install -m 600 "$STAGE/compose.yml" "$COMPOSE_FILE"
+  cp -p "$STAGE/compose.yml" "$COMPOSE_FILE"
   "${COMPOSE[@]}" -f "$COMPOSE_FILE" config --quiet
   "${COMPOSE[@]}" -f "$COMPOSE_FILE" up -d --force-recreate ansgo
   DOCKER_PAUSED=0
@@ -520,6 +682,7 @@ PY
   # 宿主的 Docker 备份也需保留策略；使用本次同版本 admin，不安装到宿主。
   ANSGO_CONF="$STAGE/docker/files/etc/ansgo/panel.json" ANSGO_LIB="$STAGE/ansgo-limits" \
     bash "$STAGE/ansgo-admin" prune --yes || say '容器升级已完成；宿主备份清理失败'
+  docker_cleanup_images
 }
 case "$MODE" in metal) upgrade_metal;; docker) upgrade_docker;; esac
 DONE=1
