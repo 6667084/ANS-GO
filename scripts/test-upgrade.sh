@@ -19,20 +19,20 @@ python3 - "$TMP" <<'PY'
 import pathlib,struct,sys
 root=pathlib.Path(sys.argv[1])
 h=bytearray(20);h[:6]=b'\x7fELF\x02\x01';h[18:20]=struct.pack('<H',62)
-for name,body in [('trimpath',b'prefix1.6.0\0'),('buildinfo',b'main.version=1.6.0'),
-                  ('comment',b'// v1.6.0 UI history\n'),('wrong',b'1.5.37\0')]:
+for name,body in [('trimpath',b'prefix1.6.1\0'),('buildinfo',b'main.version=1.6.1'),
+                  ('comment',b'// v1.6.1 UI history\n'),('wrong',b'1.5.37\0')]:
     (root/name).write_bytes(h+body)
 PY
 AARCH=amd64
 for name in trimpath buildinfo; do
-  ansgo_verify_elf "$TMP/$name" amd64 v1.6.0
-  verify_elf "$TMP/$name" v1.6.0
+  ansgo_verify_elf "$TMP/$name" amd64 v1.6.1
+  verify_elf "$TMP/$name" v1.6.1
 done
 for name in comment wrong; do
-  if ansgo_verify_elf "$TMP/$name" amd64 v1.6.0 2>/dev/null; then exit 1; fi
-  if verify_elf "$TMP/$name" v1.6.0 2>/dev/null; then exit 1; fi
+  if ansgo_verify_elf "$TMP/$name" amd64 v1.6.1 2>/dev/null; then exit 1; fi
+  if verify_elf "$TMP/$name" v1.6.1 2>/dev/null; then exit 1; fi
 done
-if ansgo_verify_elf "$TMP/trimpath" arm64 v1.6.0 2>/dev/null; then exit 1; fi
+if ansgo_verify_elf "$TMP/trimpath" arm64 v1.6.1 2>/dev/null; then exit 1; fi
 echo 'PASS ELF: trimpath 与 buildinfo 版本、拒绝历史注释/错误版本/架构'
 printf '{"panel_port":15608,"url_path":"/example/"}\n' > "$TMP/panel.json"
 MODE=metal
@@ -165,7 +165,7 @@ elif a[0] == 'pull':
     if not image(a[1]):
         s['images'].append(dict(id=s['target'],tags=[a[1]],size=410*1024**2)); save()
 elif a[0] == 'exec':
-    if a[2] == 'cat': out('v1.6.0')
+    if a[2] == 'cat': out('v1.6.1')
     elif a[2:4] == ['bash','-c'] and 'curl --noproxy' in a[4] and s.get('fail_http'): sys.exit(15)
 elif a[0] == 'cp': pass
 elif a[0] == 'run':
@@ -227,7 +227,7 @@ def run(name, *, available=1500*M, post=800*M, extras=(), local_target=False,
     (stage/'ansgo-limits').write_text('# fixture\n')
     mem = root/'meminfo'; mem.write_text('MemTotal: 475136 kB\n')
     images = [record('old'), record('foreign','example/other'), *extras]
-    if local_target: images.append(dict(id=ids['target'],tags=['ghcr.io/6667084/ansgo:v1.6.0'],size=410*M))
+    if local_target: images.append(dict(id=ids['target'],tags=['ghcr.io/6667084/ansgo:v1.6.1'],size=410*M))
     cfg = config if config is not None else dict(mem_limit=320*M, environment={
         'PANEL_PASS':'fixture-panel-unique','DYNU_API_KEY':'fixture-dynu-unique','CERT_MODE':cert_mode,'EXAMPLE':'a$b'},
         logging=dict(driver='json-file',options={}),volumes=[dict(target='/etc/ansgo'),dict(target='/etc/gai.conf')])
@@ -240,7 +240,7 @@ def run(name, *, available=1500*M, post=800*M, extras=(), local_target=False,
         code = code.replace('docker_prepare_compose(){', 'docker_prepare_compose(){\n  local -a COMPOSE=("$REAL_DOCKER" compose)')
     setup = r'''
 STAGE="$1/stage"; DOCKER_DIR="$1/project"; COMPOSE_FILE="$DOCKER_DIR/docker-compose.yml"
-COMPOSE=(docker compose); VER=v1.6.0; RAW=fixture; MODE=docker; AUTO=0
+COMPOSE=(docker compose); VER=v1.6.1; RAW=fixture; MODE=docker; AUTO=0
 MUTATED=0; DONE=0; DOCKER_PAUSED=0; METAL_PAUSED=0; BACKUP=''
 RESULT="$1/result"; LOG="$1/log"; TASK_ID=fixture; TASK_STARTED=1
 say(){ printf '%s\n' "$*"; }
@@ -266,7 +266,7 @@ dl(){ printf '# fixture\n' > "$2"; }
                       '# 用户调优','# 日志注释','# 日志参数注释','# 空映射','# 保留 gai 挂载',
                       '/etc/gai.conf:/etc/gai.conf:ro','mem_limit: 320m','EXAMPLE: a$$b',
                       'memswap_limit: '+str(expected_mem+256*M),'pids_limit: 512','cpu_shares: 512','cpus: 1.0',
-                      'ghcr.io/6667084/ansgo:v1.6.0','/host/manual-certs']:
+                      'ghcr.io/6667084/ansgo:v1.6.1','/host/manual-certs']:
             if token in template and token not in text: continue
             assert token in updated, (name,token,updated)
         assert updated.split('  ansgo:',1)[0] == text.split('  ansgo:',1)[0]
@@ -281,7 +281,7 @@ dl(){ printf '# fixture\n' > "$2"; }
         if real_compose:
             resolved = subprocess.check_output([real_compose,'compose','-f',str(compose),'config','--format','json'],text=True)
             actual = json.loads(resolved)['services']['ansgo']
-            assert actual['image'].endswith(':v1.6.0') and int(actual['mem_limit']) == expected_mem
+            assert actual['image'].endswith(':v1.6.1') and int(actual['mem_limit']) == expected_mem
             assert int(actual['memswap_limit']) == expected_mem+256*M
             assert actual['environment']['EXAMPLE'] == 'a$$b'
             assert actual['environment']['PANEL_PASS'] == 'fixture-panel-unique'

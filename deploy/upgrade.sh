@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ANS-GO v1.6.0：同版本资产先校验，再切换；失败恢复整套备份。
+# ANS-GO v1.6.1：同版本资产先校验，再切换；失败恢复整套备份。
 _ansi_self="${BASH_SOURCE[0]:-}"
 case "$_ansi_self" in
   ''|/dev/fd/*|/proc/self/fd/*)
@@ -13,7 +13,7 @@ esac
 set -Eeuo pipefail
 umask 077
 REPO=6667084/ANS-GO
-VER="v1.6.0"
+VER="v1.6.1"
 MODE='' YES=0 AUTO=0 STAGE='' BACKUP='' MUTATED=0 DONE=0 DOCKER_PAUSED=0 METAL_PAUSED=0
 DOCKER_DIR=/etc/ansgo-docker
 COMPOSE_FILE="$DOCKER_DIR/docker-compose.yml"

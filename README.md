@@ -2,9 +2,9 @@
 
 在低配 VPS 上部署 Shadowsocks、AnyTLS、SOCKS5、NaiveProxy 与 Go Web 管理面板。支持裸金属 systemd 与 Docker 一体化部署，共享一张证书，并提供可恢复升级、离线管理和多落地服务。
 
-![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/latest_release-v1.6.0-blue) ![license](https://img.shields.io/badge/license-MIT-blue)
+![status](https://img.shields.io/badge/status-已部署验证-brightgreen) ![version](https://img.shields.io/badge/latest_release-v1.6.1-blue) ![license](https://img.shields.io/badge/license-MIT-blue)
 
-> 所有命令默认以 `root` 执行；非 root 用户请加 `sudo`。当前最新稳定版为 **v1.6.0**，GitHub Release 提供 6 项资产、`SHA256SUMS` 与 `ghcr.io/6667084/ansgo:v1.6.0` / `latest` 多架构镜像。
+> 所有命令默认以 `root` 执行；非 root 用户请加 `sudo`。当前最新稳定版为 **v1.6.1**，GitHub Release 提供 6 项资产、`SHA256SUMS` 与 `ghcr.io/6667084/ansgo:v1.6.1` / `latest` 多架构镜像。
 
 ## 快速开始
 
@@ -33,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \
 | nginx/宝塔共存 | 在上述安装参数中加入 `--no-caddy`；通常同时使用 `--cert-mode manual --cert-fullchain <FULLCHAIN_PATH> --cert-privkey <PRIVKEY_PATH>` |
 | 落地机独立 SS | `curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/install.sh \| bash -s -- --landing --port <PORT> --non-interactive` |
 | 升级（自动识别形态） | `curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh \| bash -s -- --yes` |
-| 升级到指定版本 | `curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh \| bash -s -- --yes --ver v1.6.0` |
+| 升级到指定版本 | `curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.sh \| bash -s -- --yes --ver v1.6.1` |
 | 查看状态 / URI | `ansgo-admin status` / `ansgo-admin info`；Docker：`docker exec ansgo ansgo-admin status` |
 | 查看日志 | `ansgo-admin logs all`；或 `journalctl -u ansgo-panel -u sing-box -u caddy -n 200 --no-pager` |
 | 清理空间 | `ansgo-admin prune --yes`；Docker：`docker exec ansgo ansgo-admin prune --yes` |
@@ -89,8 +89,8 @@ curl -fsSL https://raw.githubusercontent.com/6667084/ANS-GO/main/deploy/upgrade.
   | bash -s -- --yes
 
 # 指定形态或版本
-/usr/local/bin/ansgo-upgrade --metal --yes --ver v1.6.0
-/usr/local/bin/ansgo-upgrade --docker --yes --ver v1.6.0
+/usr/local/bin/ansgo-upgrade --metal --yes --ver v1.6.1
+/usr/local/bin/ansgo-upgrade --docker --yes --ver v1.6.1
 
 # 仅自动升级 timer 使用：检查最新稳定版，无更新则不改动系统
 /usr/local/bin/ansgo-upgrade --auto
@@ -110,7 +110,7 @@ ansgo-admin restore /etc/ansgo-backup/upgrade-<TIMESTAMP>.tar.gz
 ANSGO_RAW_BASE=<DEPLOY_BASE_URL> \
 ANSGO_REL_BASE=<RELEASE_BASE_URL> \
 ANSGO_RELEASE_API=<RELEASE_API_URL> \
-/usr/local/bin/ansgo-upgrade --yes --ver v1.6.0
+/usr/local/bin/ansgo-upgrade --yes --ver v1.6.1
 ```
 
 其中 `ANSGO_RAW_BASE` 是目标 tag 的 `deploy` 目录 URL，`ANSGO_REL_BASE` 是 release 下载根，`ANSGO_RELEASE_API` 是 release 元数据根。覆盖源必须提供与官方相同的路径结构和完整、可信的资产。
