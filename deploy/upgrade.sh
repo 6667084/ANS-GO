@@ -642,7 +642,7 @@ docker_cleanup_images(){
     while read -r image; do
       [ "$image" = "$OLD_IMAGE" ] || continue
       if docker_remove_image "$image"; then
-        say "为保证磁盘余量已删除旧镜像，如需回滚将重新拉取 $OLD_TAG"
+        say "为保证磁盘余量已删除旧镜像，如需回滚将重新拉取 ${OLD_HINT:-$OLD_TAG}"
       fi
     done < <(docker_old_images "$current")
   fi
@@ -652,6 +652,14 @@ upgrade_docker(){
   [ -n "$CID" ]
   OLD_IMAGE=$(docker inspect -f '{{.Image}}' "$CID")
   OLD_TAG=$(docker inspect -f '{{.Config.Image}}' "$CID")
+  # 浮动 tag（如 :latest）升级后会指向新版本，回滚提示改用旧容器内记录的明确版本号
+  local old_ver
+  old_ver=$(docker exec "$CID" cat /usr/local/share/ansgo-version 2>/dev/null || true)
+  old_ver="v${old_ver#v}"
+  OLD_HINT="$OLD_TAG"
+  if [[ "$OLD_TAG" != *:v[0-9]* && "$old_ver" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    OLD_HINT="ghcr.io/6667084/ansgo:$old_ver"
+  fi
   TARGET_IMAGE="ghcr.io/6667084/ansgo:$VER"
   DOCKER_ROOT=$(docker info --format '{{.DockerRootDir}}')
   [ -n "$DOCKER_ROOT" ]
@@ -682,7 +690,7 @@ upgrade_docker(){
   local i healthy=0
   CID=$("${COMPOSE[@]}" -f "$COMPOSE_FILE" ps -q ansgo)
   for i in {1..30}; do
-    if docker exec "$CID" systemctl is-active --quiet ansgo-panel &&
+    if docker exec "$CID" systemctl is-active --quiet ansgo-panel 2>/dev/null &&
        [ "$(docker exec "$CID" cat /usr/local/share/ansgo-version)" = "$VER" ]; then
       healthy=1; break
     fi

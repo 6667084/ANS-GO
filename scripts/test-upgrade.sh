@@ -329,7 +329,7 @@ run('indentless',text=indentless,real_config=bool(real_compose),cert_mode='manua
 print('PASS Docker compose: 保留日志驱动与已有轮转值；支持同级列表和 manual 证书模式')
 print('PASS Docker limits: 缺内存时按 464MB 宿主补 324m，重复升级不产生重复键或挂载')
 state, result, removed = run('no-space',available=344*M)
-assert not removed and not any(e.startswith(('pull ','exec ')) or ' up ' in e for e in state['events'])
+assert not removed and not any(e.startswith('pull ') or (e.startswith('exec ') and ' cat /usr/local/share/ansgo-version' not in e) or ' up ' in e for e in state['events'])
 assert '磁盘空间不足' in result.stdout and '610MB' in result.stdout
 print('PASS Docker preflight: 344MB 无可删旧镜像时中止，compose/容器/镜像不变')
 state, result, removed = run('recover-space',available=344*M,extras=[record('legacy','ghcr.io/jiasongji/ansgo')])
