@@ -330,7 +330,7 @@ text = template.replace('      - fixture_etc:', '      - type: bind\n        sou
 run('existing-mount',text=text,config=cfg,real_config=bool(real_compose))
 assert (tmp/'existing-mount/project/docker-compose.yml').read_text().count('/host/manual-certs') == 1
 for name, text in [
-    ('backup-bc-lax', template),
+    ('backup-lowmem-host', template),
     ('backup-no-top-volumes', template.replace('fixture_etc:/etc/ansgo', '/etc/ansgo:/etc/ansgo')
                                     .replace('volumes:\n  fixture_etc:\n', '')),
     ('backup-empty-top-volumes', template.replace('fixture_etc:/etc/ansgo', '/etc/ansgo:/etc/ansgo')
@@ -359,7 +359,7 @@ for name, mount, declaration in [
 cfg = json.loads(json.dumps(base_config)); cfg['volumes'] = []
 text = re.sub(r'    volumes:.*?(?=  after:)', '', template, flags=re.S)
 run('backup-no-service-volumes',text=text,config=cfg,real_config=bool(real_compose))
-print('PASS Docker backup volume: BC-LAX 注释/env_file/gai/320m/0640 保留；缺顶层/空映射/已有声明/重复升级幂等，已有自定义短长挂载不覆盖')
+print('PASS Docker backup volume: 低配生产机风格 注释/env_file/gai/320m/0640 保留；缺顶层/空映射/已有声明/重复升级幂等，已有自定义短长挂载不覆盖')
 for driver in ('journald','json-file'):
     cfg = json.loads(json.dumps(base_config))
     cfg['logging'] = dict(driver=driver,options={'max-size':'20m'} if driver=='json-file' else {})
