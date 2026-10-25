@@ -1124,8 +1124,11 @@ do_docker_deploy(){
 ║  ⚠️ 证书: $([ "$CERT_MODE" = "manual" ] && echo "手动模式（${CERT_FILE}），无需后台签发" || echo "Let's Encrypt 签发成功")
 ║  管理命令:
 ║     cd ${DIR} && $COMPOSE logs -f ansgo   # 查日志/签证书进度
-║     docker exec ansgo ansgo-admin status         # 服务状态
-║     docker exec ansgo ansgo-admin info           # 节点连接参数
+║     docker exec -it ansgo ansgo-admin status         # 服务状态
+║     docker exec -it ansgo ansgo-admin info           # 节点连接参数
+║     docker exec -it ansgo ansgo-admin panel-pass     # 找回面板密码
+║     docker exec -it ansgo ansgo-admin restart panel  # 恢复面板
+║     以上 Docker 命令在宿主机执行；若改过容器名请替换 ansgo。
 ║  下一步: 登录面板 →「服务管理」页按需开启代理服务
 ╚═══════════════════════════════════════════════════════════════╝
 EOF

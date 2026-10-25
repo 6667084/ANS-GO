@@ -12,7 +12,7 @@
 # 用法（推荐经 install.sh --docker 自动生成本文件 + ansgo.env）：
 #   docker compose up -d
 #   docker compose logs -f ansgo
-#   docker exec ansgo ansgo-admin status
+#   docker exec -it ansgo ansgo-admin status
 #
 # 手动首次部署需先准备 ansgo.env，至少包含：
 #   DOMAIN=your-domain.com

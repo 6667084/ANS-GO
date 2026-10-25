@@ -61,6 +61,17 @@ func isDockerMode() bool {
 	return false
 }
 
+func adminCmdHint(args string) string {
+	prefix := ""
+	if isDockerMode() {
+		prefix = "docker exec ansgo "
+		if args == "panel-pass" {
+			prefix = "docker exec -it ansgo "
+		}
+	}
+	return prefix + "ansgo-admin " + args
+}
+
 // ===================== 路由根 =====================
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
@@ -613,7 +624,7 @@ func restartVerify(svc string) (string, error) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	final := svcActive(svc)
-	return final, fmt.Errorf("%s 重启后未进入 active（当前 %s），可能配置错误或端口冲突；查看 journalctl -u %s", svc, final, svc)
+	return final, fmt.Errorf("%s 重启后未进入 active（当前 %s），可能配置错误或端口冲突；查看 %s", svc, final, adminCmdHint("logs "+svc))
 }
 
 // ===================== 密钥管理（委托 ansgo-admin）=====================
@@ -838,7 +849,7 @@ func keyHandler(w http.ResponseWriter, r *http.Request) {
 		jwrite(w, 500, map[string]any{
 			"ok":    false,
 			"error": err.Error(),
-			"hint":  "凭证已保存到 secrets.env 但服务未能正常重启应用新配置。请检查 journalctl -u " + confTarget + " 的错误日志。",
+			"hint":  "凭证已保存到 secrets.env 但服务未能正常重启应用新配置。请通过 SSH 执行 " + adminCmdHint("logs "+confTarget) + " 检查错误日志。",
 			"uris":  buildURIs(configGet(), readSecrets()),
 		})
 		return
@@ -2252,7 +2263,7 @@ func repairHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if anyErr {
-		jwrite(w, 500, map[string]any{"ok": false, "results": results, "hint": "部分服务修复失败，查看上方 error。可 SSH 执行 ansgo-admin restart all 兜底。"})
+		jwrite(w, 500, map[string]any{"ok": false, "results": results, "hint": "部分服务修复失败，查看上方 error。可在服务器 SSH 执行 " + adminCmdHint("restart all") + " 兜底。"})
 		return
 	}
 	jwrite(w, 200, map[string]any{"ok": true, "results": results, "msg": "配置已从 secrets.env 重新生成并重启验证，secrets↔配置已同步。请用节点信息页的最新凭证配置客户端。"})
@@ -2862,7 +2873,7 @@ func svcInstallHandler(w http.ResponseWriter, r *http.Request) {
 				"ok":      false,
 				"service": b.Service,
 				"error":   errMsg,
-				"hint":    "已回滚服务开关并尝试恢复旧配置。查看日志：journalctl -u " + procName + " -n 30。常见原因：NaiveProxy 凭证含特殊字符、端口冲突、证书路径错误。",
+				"hint":    "已回滚服务开关并尝试恢复旧配置。查看日志：" + adminCmdHint("logs "+procName) + "。常见原因：NaiveProxy 凭证含特殊字符、端口冲突、证书路径错误。",
 			})
 			return
 		}

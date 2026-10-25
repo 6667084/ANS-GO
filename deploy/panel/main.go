@@ -558,7 +558,7 @@ func main() {
 	maybeAutoProbeServerIP(c)
 
 	if c.AdminPassHash == "" || strings.HasPrefix(c.AdminPassHash, "PLACEHOLDER") {
-		log.Println("警告: 管理员密码尚未设置（PLACEHOLDER），请执行 ansgo-admin panel-pass 设置。")
+		log.Printf("警告: 管理员密码尚未设置（PLACEHOLDER），请在服务器 SSH 执行 %s 设置。", adminCmdHint("panel-pass"))
 	}
 
 	mux := http.NewServeMux()
