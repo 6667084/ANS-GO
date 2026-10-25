@@ -339,6 +339,29 @@ ansgo_asset_probe(){
     err "预检需要已有 curl 或 wget，请先安装下载工具"; return 1
   fi
 }
+ansgo_compose_v2_hint(){
+  err "需要 Docker Compose v2（docker compose 子命令）"
+  err "Debian/Ubuntu: apt-get install -y docker-compose-plugin（软件源无此包时先配置 Docker 官方源）"
+  err "也可安装官方静态插件：mkdir -p /usr/local/lib/docker/cli-plugins"
+  err "curl -fL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m) -o /usr/local/lib/docker/cli-plugins/docker-compose && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose"
+}
+ansgo_compose_check(){
+  local file="$1"
+  if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then
+    COMPOSE="docker compose"
+  elif command -v docker-compose >/dev/null; then
+    COMPOSE="docker-compose"
+  else
+    # 未安装 Docker 时由后续官方安装器安装引擎与插件。
+    command -v docker >/dev/null || return 0
+    ansgo_compose_v2_hint; return 1
+  fi
+  if ! $COMPOSE -f "$file" config --quiet >/dev/null 2>&1; then
+    if [ "$COMPOSE" = docker-compose ]; then ansgo_compose_v2_hint
+    else err "Docker Compose 配置预检失败，请检查模板、环境文件与插件版本"; fi
+    return 1
+  fi
+}
 ansgo_preflight_assets(){
   local f meta="$WORK/release.json"
   dl "$RELEASE_API/$VER" "$meta" || { err "发布元数据不可下载"; return 1; }
@@ -357,8 +380,12 @@ PYPREFLIGHT
   done
   if [ "$DOCKER" = 1 ]; then
     ansgo_asset_probe "$RAW/docker-compose.yml" || return 1
+    dl "$RAW/docker-compose.yml" "$WORK/docker-compose.yml" || return 1
+    # 用空环境文件校验模板兼容性，不落宿主配置或凭据。
+    : > "$WORK/ansgo.env"
+    ansgo_compose_check "$WORK/docker-compose.yml" || return 1
   else
-    if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -Fq 'http.handlers.forward_proxy'; then
+    if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -F 'http.handlers.forward_proxy' >/dev/null; then
       ansgo_asset_probe "$REL/$VER/caddy-naive-linux-$AARCH" ||
         ansgo_asset_probe "$REL/v1.5.16/caddy-naive-linux-$AARCH" || return 1
     fi
@@ -633,7 +660,7 @@ docker_gen_ansgo_env(){
   # 取值优先级：显式 CLI 输入（PANEL_PASSWORD_IN/URL_PATH_IN）> 调用方已算好的值
   # （do_docker_deploy 的显示输出与 env 文件保持一致）> 随机（测试/独立调用路径）
   _pw="${PANEL_PASSWORD_IN:-${PANEL_PW:-}}"
-  [ -n "$_pw" ] || _pw="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)"
+  [ -n "$_pw" ] || _pw="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c 1-20)"
   _up="${URL_PATH_IN:-${URL_PATH:-}}"
   [ -n "$_up" ] || _up="/$(openssl rand -hex 4)/"
   # 标题 percent-encode（transport 编码；entrypoint 解码后写可读值）。
@@ -692,8 +719,8 @@ rand_port(){
   while :; do
     p=$(( (RANDOM << 15 | RANDOM) % 55536 + 10000 ))  # 10000-65535
     # 跳过系统保留 / 已监听 / 本次已选
-    { echo "$sys_used" | grep -qx "$p"; } && continue
-    { echo "$busy" | grep -qx "$p"; } && continue
+    { echo "$sys_used" | grep -x "$p" >/dev/null; } && continue
+    { echo "$busy" | grep -x "$p" >/dev/null; } && continue
     echo "$p"; return
   done
 }
@@ -711,6 +738,91 @@ fill_ports(){
 # 卸载（apt purge 风格两级：默认保留配置/卷，--purge 彻底删除一切）
 #   自动检测部署模式：Docker（/etc/ansgo-docker/）或裸金属（/etc/ansgo/）
 # =============================================================================
+ansgo_purge_images(){
+  command -v docker >/dev/null || return 0
+  local images image refs used
+  images=$(docker image ls --no-trunc --format '{{.Repository}} {{.ID}}' |
+    awk '$1=="ghcr.io/6667084/ansgo" || $1=="ghcr.io/jiasongji/ansgo" {ids[$2]=1}
+         END {for (id in ids) print id}') || { warn "无法列出本项目镜像，请稍后手动检查"; return 0; }
+  while read -r image; do
+    [ -n "$image" ] || continue
+    # 共用 ID 的其它仓库标签/摘要、其它容器的引用都必须保留。
+    refs=$(docker image inspect --format '{{range .RepoTags}}{{println .}}{{end}}{{range .RepoDigests}}{{println .}}{{end}}' "$image") || continue
+    if ! printf '%s\n' "$refs" | awk '
+      {sub(/@.*/, ""); sub(/:[^\/]*$/, "");
+       if ($0!="ghcr.io/6667084/ansgo" && $0!="ghcr.io/jiasongji/ansgo") bad=1}
+      END {exit (NR==0 || bad)}'; then
+      warn "保留其它仓库共用的镜像: $image"; continue
+    fi
+    used=$(docker ps -aq --filter "ancestor=$image") || continue
+    if [ -n "$used" ]; then warn "保留其它容器仍引用的镜像: $image"; continue; fi
+    docker image rm --force "$image" || warn "无法删除镜像，请手动检查: $image"
+  done <<< "$images"
+}
+ansgo_tuning_content(){
+  awk '!/^[[:space:]]*#/ {
+    sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "");
+    gsub(/[[:space:]]+/, " "); gsub(/ *= */, "="); if (length) print
+  }' "$@" | LC_ALL=C sort
+}
+ansgo_purge_tuning(){
+  local net_old net_current limits journal file content header expected net_changed=0 journal_changed=0
+  # v1.5.x install.sh 的原始模板；旧 proxy 文件名也只按这些已知内容认领。
+  net_old=$(ansgo_tuning_content <<'SYS'
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_max_tw_buckets = 1048576
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 3
+net.ipv4.ip_local_port_range = 10000 65535
+SYS
+)
+  net_current=$(printf '%s\n' "$net_old" | grep -vE 'tcp_max_tw_buckets|ip_local_port_range')
+  limits=$(ansgo_tuning_content <<'LIM'
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+LIM
+)
+  journal=$(ansgo_tuning_content <<'JOU'
+[Journal]
+SystemMaxUse=50M
+JOU
+)
+  for file in /etc/sysctl.d/99-ansgo-tune.conf /etc/sysctl.d/99-proxy-tune.conf \
+      /etc/security/limits.d/99-ansgo.conf /etc/security/limits.d/99-proxy.conf \
+      /etc/systemd/journald.conf.d/60-ansgo.conf /etc/systemd/journald.conf.d/size.conf; do
+    [ -f "$file" ] || continue
+    if [ -L "$file" ]; then warn "保留调优软链: $file"; continue; fi
+    case "$file" in
+      */sysctl.d/*) expected="$net_old";;
+      */limits.d/*) expected="$limits";;
+      *) expected="$journal";;
+    esac
+    header=$(sed -n '1,8p' "$file")
+    content=$(ansgo_tuning_content "$file") || continue
+    if printf '%s\n' "$header" | grep -E '^[[:space:]]*#[[:space:]]*(managed-by:[[:space:]]*ansgo|ANS-GO)([[:space:]]|$)' >/dev/null ||
+       [ "$content" = "$expected" ] ||
+       { [[ "$file" = */sysctl.d/* ]] && [ "$content" = "$net_current" ]; }; then
+      rm -f "$file" || continue
+      case "$file" in
+        */sysctl.d/*) net_changed=1;;
+        */journald.conf.d/*) journal_changed=1;;
+      esac
+    else
+      warn "保留无法确认由本项目生成的调优文件: $file"
+    fi
+  done
+  if [ "$net_changed" = 1 ]; then sysctl --system >/dev/null 2>&1 || true; fi
+  if [ "$journal_changed" = 1 ]; then systemctl restart systemd-journald >/dev/null 2>&1 || true; fi
+}
 do_uninstall(){
   [ "$(id -u)" = 0 ] || { err "需 root 运行"; exit 1; }
   local PURGE="${PURGE:-0}"
@@ -720,12 +832,15 @@ do_uninstall(){
   # ---- 检测部署模式 ----
   local HAS_DOCKER=0 HAS_METAL=0
   [ -f /etc/ansgo-docker/docker-compose.yml ] && HAS_DOCKER=1
-  { [ -f /etc/ansgo/panel.json ] || systemctl list-unit-files 2>/dev/null | grep -qE 'ansgo-panel|sing-box|caddy' \
+  { [ -f /etc/ansgo/panel.json ] || systemctl list-unit-files 2>/dev/null | grep -E 'ansgo-panel|sing-box|caddy' >/dev/null \
     || [ -x /usr/local/bin/ansgo-panel ]; } && HAS_METAL=1
 
   if [ "$HAS_DOCKER" = 0 ] && [ "$HAS_METAL" = 0 ]; then
     if [ "$PURGE" = 1 ] && { [ -d /etc/ansgo-backup ] || [ -d /var/lib/ansgo ] \
       || [ -d /var/log/ansgo ] || [ -f /etc/ansgo-cert.status ] \
+      || [ -f /etc/sysctl.d/99-ansgo-tune.conf ] || [ -f /etc/sysctl.d/99-proxy-tune.conf ] \
+      || [ -f /etc/security/limits.d/99-ansgo.conf ] || [ -f /etc/security/limits.d/99-proxy.conf ] \
+      || [ -f /etc/systemd/journald.conf.d/60-ansgo.conf ] || [ -f /etc/systemd/journald.conf.d/size.conf ] \
       || compgen -G '/etc/ansgo-backup-*' >/dev/null; }; then
       warn "仅检测到备份/维护数据，将继续清除残留"
     else
@@ -765,11 +880,6 @@ do_uninstall(){
         docker volume ls --format '{{.Name}}' 2>/dev/null \
           | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme)$|_ansgo_(etc|ssl|caddy|sb|acme)$' \
           | xargs -r docker volume rm 2>/dev/null || true
-        log "[Docker] 删除本地镜像（容器已删，镜像可安全移除）..."
-        docker image rm ghcr.io/6667084/ansgo:latest 2>/dev/null || true
-        docker image rm ghcr.io/6667084/ansgo-panel:latest 2>/dev/null || true
-        docker image rm ghcr.io/jiasongji/ansgo:latest 2>/dev/null || true   # 旧用户名命名空间（改名前部署）
-        docker image rm ghcr.io/jiasongji/ansgo-panel:latest 2>/dev/null || true
       fi
     else
       warn "[Docker] docker 命令缺失或 compose 文件不在，已尝试手动清理容器"
@@ -778,6 +888,8 @@ do_uninstall(){
         | xargs -r docker volume rm 2>/dev/null || true
     fi
     if [ "$PURGE" = 1 ]; then
+      log "[Docker] 按仓库精确清理全部版本镜像..."
+      ansgo_purge_images
       rm -rf /etc/ansgo-docker
       log "[Docker] 已删除 /etc/ansgo-docker/（含 ansgo.env + compose）"
     else
@@ -806,8 +918,6 @@ do_uninstall(){
       rm -f /usr/local/bin/sing-box /usr/local/bin/caddy
       rm -rf /etc/ansgo /etc/ssl/ansgo /etc/sing-box /etc/caddy /var/www/html
       rm -rf /root/.acme.sh /etc/ansgo-deploy
-      rm -f /etc/sysctl.d/99-ansgo-tune.conf /etc/security/limits.d/99-ansgo.conf
-      rm -f /etc/systemd/journald.conf.d/60-ansgo.conf
       rm -rf /etc/systemd/system/ansgo-panel.service.d \
              /etc/systemd/system/caddy.service.d \
              /etc/systemd/system/sing-box.service.d
@@ -821,6 +931,7 @@ do_uninstall(){
   fi
 
   if [ "$PURGE" = 1 ]; then
+    ansgo_purge_tuning
     rm -rf /etc/ansgo-backup /etc/ansgo-backup-* /etc/ansgo-uninstall-backup-* \
            /var/lib/ansgo /var/log/ansgo
     rm -f /etc/ansgo-cert.status
@@ -881,12 +992,14 @@ ask_req(){ # prompt ; NONINT 下为空则报错
 do_docker_deploy(){
   hr "Docker 一体化部署（all-in-one 容器）"
   command -v docker >/dev/null 2>&1 || { log "安装 docker ..."; curl -fsSL https://get.docker.com | sh; }
+  ansgo_compose_check "$WORK/docker-compose.yml" || exit 8
+  log "使用 compose 命令: $COMPOSE"
 
   # host 网络端口冲突预警（v1.5.10: --no-caddy 模式下 80/443 不再预警，由 nginx 等接管）
   WARN_PORTS="$PANEL_PORT"
   [ "$NO_CADDY" = 0 ] && WARN_PORTS="80 443 $PANEL_PORT"
   for p in $WARN_PORTS; do
-    if command -v ss >/dev/null && ss -tln 2>/dev/null | awk '{print $4}' | grep -qE ":$p$"; then
+    if command -v ss >/dev/null && ss -tln 2>/dev/null | awk '{print $4}' | grep -E ":$p$" >/dev/null; then
       warn "端口 $p 已被占用，host 网络下容器可能启动失败，请先停掉占用进程"
     fi
   done
@@ -897,7 +1010,7 @@ do_docker_deploy(){
   # 随机面板密码 + URL 路径（仅首次部署生效；卷已存在时以容器内实际为准）
   # v1.5.5: 支持 --panel-password / --panel-url-path 指定
   local PANEL_PW URL_PATH
-  PANEL_PW="${PANEL_PASSWORD_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
+  PANEL_PW="${PANEL_PASSWORD_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c 1-20)}"
   URL_PATH="${URL_PATH_IN:-/$(openssl rand -hex 4)/}"
 
   # ansgo.env：凭证 + 端口 + 用户预指定密钥（600 权限，敏感不入 git）
@@ -908,7 +1021,7 @@ do_docker_deploy(){
   chmod 600 "$DIR/ansgo.env" || { err "无法设置 $DIR/ansgo.env 权限"; exit 1; }
   log "已生成 $DIR/ansgo.env（含凭证，权限 600）"
 
-  dl_or_exit "$RAW/docker-compose.yml" "$DIR/docker-compose.yml"
+  cp "$WORK/docker-compose.yml" "$DIR/docker-compose.yml" || exit 1
 
   # ---- v1.5.36: 按宿主内存收紧容器资源约束 ----
   #   模板默认 mem_limit=512m / memswap_limit=768m（适配 >1G 宿主）。
@@ -953,26 +1066,11 @@ do_docker_deploy(){
 
   cd "$DIR" || exit 1
 
-  # v1.5.10 修复：检测 docker compose v2（子命令）vs docker-compose v1（独立二进制）
-  #   宝塔/老 Debian 可能只有 v1（docker-compose），没有 v2（docker compose 子命令）
-  #   之前用 `docker compose pull 2>/dev/null` 吞掉 stderr，导致 v2 不存在时静默失败 → 误走本地构建
-  COMPOSE=""
-  if docker compose version >/dev/null 2>&1; then
-    COMPOSE="docker compose"
-  elif command -v docker-compose >/dev/null 2>&1; then
-    COMPOSE="docker-compose"
-  else
-    err "未找到 docker compose（v2 子命令）也未找到 docker-compose（v1）。请安装 docker compose plugin 或 docker-compose。"
-    err "  Debian/Ubuntu: apt-get install docker-compose-plugin 或 curl -L https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose"
-    exit 8
-  fi
-  log "使用 compose 命令: $COMPOSE ($($COMPOSE version --short 2>/dev/null || echo unknown))"
-
   # 拉镜像：优先 compose pull；失败再用 docker pull 兜底（绕过 compose 自身问题）
   #   使用与脚本一致的固定版本镜像，--ver 不回退到浮动 latest
   IMG="ghcr.io/${REPO%/*}/ansgo:${VER}"
   sed -i "s#image: ghcr.io/6667084/ansgo:.*#image: ${IMG}#" "$DIR/docker-compose.yml"
-  $COMPOSE config --quiet || exit 1
+  ansgo_compose_check "$DIR/docker-compose.yml" || exit 8
   if ! $COMPOSE pull 2>&1 | tail -5; then
     warn "$COMPOSE pull 失败，尝试直接 docker pull $IMG 兜底"
     if ! docker pull "$IMG" 2>&1 | tail -10; then
@@ -1095,7 +1193,7 @@ if [ "$NONINT" = 0 ]; then
   if [ "$NO_CADDY" = 0 ] && command -v ss >/dev/null 2>&1; then
     PORT_BUSY=""
     for p in 80 443; do
-      ss -tln 2>/dev/null | awk '{print $4}' | grep -qE ":$p$" && PORT_BUSY="$PORT_BUSY $p"
+      ss -tln 2>/dev/null | awk '{print $4}' | grep -E ":$p$" >/dev/null && PORT_BUSY="$PORT_BUSY $p"
     done
     if [ -n "$PORT_BUSY" ]; then
       warn "检测到端口$PORT_BUSY 已被占用（可能已有 nginx/Caddy/宝塔等 web 服务器）"
@@ -1151,7 +1249,7 @@ command -v timeout >/dev/null || { err "缺少 coreutils timeout"; exit 1; }
 # 拒绝首次安装抢占既有监听（已部署重跑的端口由持久配置负责）。
 if [ ! -f /etc/ansgo/panel.json ] && [ ! -f /etc/ansgo-docker/docker-compose.yml ]; then
   for p in "$SS_PORT" "$ANYTLS_PORT" "$SOCKS_PORT" "$NAIVE_PORT" "$PANEL_PORT"; do
-    if _listening_ports | grep -qx "$p"; then err "端口 $p 已被监听，请换端口"; exit 1; fi
+    if _listening_ports | grep -x "$p" >/dev/null; then err "端口 $p 已被监听，请换端口"; exit 1; fi
   done
 fi
 if [ "$CERT_MODE" = manual ]; then
@@ -1201,7 +1299,7 @@ if [ "$FORCE_BIN" = 1 ] || ! command -v sing-box >/dev/null; then
   "$BIN_STAGE/sing-box" version >/dev/null || exit 3
   mv "$BIN_STAGE/sing-box" /usr/local/bin/sing-box || exit 3
 fi
-if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -Fq 'http.handlers.forward_proxy'; then
+if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules 2>/dev/null | grep -F 'http.handlers.forward_proxy' >/dev/null; then
   if ! dl "$REL/$VER/caddy-naive-linux-${AARCH}" "$BIN_STAGE/caddy"; then
     if ! dl "$REL/v1.5.16/caddy-naive-linux-${AARCH}" "$BIN_STAGE/caddy"; then
       avail_mb=$(df -m / | awk 'NR==2{print $4}')
@@ -1239,7 +1337,7 @@ if [ "$FORCE_BIN" = 1 ] || ! command -v caddy >/dev/null || ! caddy list-modules
     fi
   fi
   chmod 755 "$BIN_STAGE/caddy" || exit 3
-  "$BIN_STAGE/caddy" list-modules | grep -Fq 'http.handlers.forward_proxy' || { err "Caddy 资产缺少 forward_proxy"; exit 3; }
+  "$BIN_STAGE/caddy" list-modules | grep -F 'http.handlers.forward_proxy' >/dev/null || { err "Caddy 资产缺少 forward_proxy"; exit 3; }
   mv "$BIN_STAGE/caddy" /usr/local/bin/caddy || exit 3
 fi
 
@@ -1255,9 +1353,9 @@ SS_KEY=${SS_PASSWORD:-$(openssl rand -base64 16)}
 ANYTLS_PASS=${ANYTLS_PASSWORD:-$(openssl rand -hex 16)}
 ANYTLS_UUID=${ANYTLS_UUID_IN:-$(cat /proc/sys/kernel/random/uuid)}
 SOCKS_USER=${SOCKS_USER_IN:-$(openssl rand -hex 6)}
-SOCKS_PASS=${SOCKS_PASSWORD:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}
+SOCKS_PASS=${SOCKS_PASSWORD:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c 1-20)}
 NAIVE_USER=${NAIVE_USER_IN:-$(openssl rand -hex 6)}
-NAIVE_PASS=${NAIVE_PASSWORD:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}
+NAIVE_PASS=${NAIVE_PASSWORD:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c 1-20)}
 EOF
   log "已生成 /etc/ansgo/secrets.env"
   # 提示哪些字段用了用户提供的值（不会打印值本身，仅提示字段名）
@@ -1369,7 +1467,7 @@ ansgo_limits || exit 1
 systemctl daemon-reload
 # 设置管理员密码（bcrypt 写入 panel.json，打印明文仅一次）
 # v1.5.5: 支持 --panel-password 指定，否则随机
-PANEL_PW="${PANEL_PASSWORD_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)}"
+PANEL_PW="${PANEL_PASSWORD_IN:-$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c 1-20)}"
 /usr/local/bin/ansgo-panel -setpass "$PANEL_PW" || { err "管理员密码设置失败"; exit 1; }
 systemctl enable ansgo-panel >/dev/null 2>&1 || true
 systemctl reset-failed ansgo-panel 2>/dev/null || true
