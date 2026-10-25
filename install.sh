@@ -872,19 +872,19 @@ do_uninstall(){
       # 再次兑底：compose down 可能因 project 名不一致而遗漏
       docker rm -f ansgo 2>/dev/null || true
       if [ "$PURGE" = 1 ]; then
-        log "[Docker] 删除数据卷（配置/密钥/证书/acme）..."
+        log "[Docker] 删除数据卷（配置/密钥/证书/acme/日常备份）..."
         ( cd /etc/ansgo-docker && docker compose down -v --remove-orphans 2>/dev/null \
           || docker-compose down -v 2>/dev/null || true )
         # 兑底删除可能残留的卷（compose project 名不同时）；按名称模式匹配，
         # 覆盖 ansgo_* / ansgo-docker_ansgo_* / 自定义 project 名的卷
         docker volume ls --format '{{.Name}}' 2>/dev/null \
-          | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme)$|_ansgo_(etc|ssl|caddy|sb|acme)$' \
+          | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme|backup)$|_ansgo_(etc|ssl|caddy|sb|acme|backup)$' \
           | xargs -r docker volume rm 2>/dev/null || true
       fi
     else
       warn "[Docker] docker 命令缺失或 compose 文件不在，已尝试手动清理容器"
       [ "$PURGE" = 1 ] && docker volume ls --format '{{.Name}}' 2>/dev/null \
-        | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme)$|_ansgo_(etc|ssl|caddy|sb|acme)$' \
+        | grep -iE 'ansgo_(etc|ssl|caddy|sb|acme|backup)$|_ansgo_(etc|ssl|caddy|sb|acme|backup)$' \
         | xargs -r docker volume rm 2>/dev/null || true
     fi
     if [ "$PURGE" = 1 ]; then
@@ -1124,8 +1124,11 @@ do_docker_deploy(){
 ║  ⚠️ 证书: $([ "$CERT_MODE" = "manual" ] && echo "手动模式（${CERT_FILE}），无需后台签发" || echo "Let's Encrypt 签发成功")
 ║  管理命令:
 ║     cd ${DIR} && $COMPOSE logs -f ansgo   # 查日志/签证书进度
-║     docker exec ansgo ansgo-admin status         # 服务状态
-║     docker exec ansgo ansgo-admin info           # 节点连接参数
+║     docker exec -it ansgo ansgo-admin status         # 服务状态
+║     docker exec -it ansgo ansgo-admin info           # 节点连接参数
+║     docker exec -it ansgo ansgo-admin panel-pass     # 找回面板密码
+║     docker exec -it ansgo ansgo-admin restart panel  # 恢复面板
+║     以上 Docker 命令在宿主机执行；若改过容器名请替换 ansgo。
 ║  下一步: 登录面板 →「服务管理」页按需开启代理服务
 ╚═══════════════════════════════════════════════════════════════╝
 EOF

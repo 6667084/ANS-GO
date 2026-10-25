@@ -12,7 +12,7 @@
 # 用法（推荐经 install.sh --docker 自动生成本文件 + ansgo.env）：
 #   docker compose up -d
 #   docker compose logs -f ansgo
-#   docker exec ansgo ansgo-admin status
+#   docker exec -it ansgo ansgo-admin status
 #
 # 手动首次部署需先准备 ansgo.env，至少包含：
 #   DOMAIN=your-domain.com
@@ -61,6 +61,7 @@ services:
       - ansgo_caddy:/etc/caddy
       - ansgo_sb:/etc/sing-box
       - ansgo_acme:/root/.acme.sh
+      - ansgo_backup:/etc/ansgo-backup
       # v1.5.32：Docker 手动证书同步目录（宿主计划任务写入，容器只读导入到 /etc/ssl/ansgo）
       - /etc/ansgo-docker/manual-certs:/host/manual-certs:ro
 
@@ -70,3 +71,4 @@ volumes:
   ansgo_caddy:
   ansgo_sb:
   ansgo_acme:
+  ansgo_backup:

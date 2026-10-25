@@ -111,6 +111,52 @@ async function click(b) { b.click(); await settle(); }
 let passed = 1;
 async function test(name, fn) { try { await fn(); passed++; console.log('ok - ' + name); } catch (error) { console.error('FAIL - ' + name); throw error; } }
 
+await test('登录前找回密码默认折叠，两种命令各自可复制且不查询部署形态', async () => {
+  const b = await boot();
+  b.fixture.data.auth.authed = false; b.requests.length = 0; await b.ctx.checkAuth();
+  const details = b.document.querySelector('#passwordHelp'), commands = b.document.querySelector('#passwordCommands');
+  assert.equal(details.tagName, 'DETAILS'); assert.equal(details.open, false);
+  assert.match(html, /<summary>忘记密码？<\/summary>/);
+  assert.equal(b.document.querySelector('#login').hidden, false);
+  details.open = true;
+  assert.deepEqual(commands.querySelectorAll('code').map(n => n.textContent), ['ansgo-admin panel-pass', 'docker exec -it ansgo ansgo-admin panel-pass']);
+  assert.match(commands.textContent, /裸金属.*服务器 SSH.*Docker.*宿主机 SSH.*若改过容器名/);
+  const buttons = commands.querySelectorAll('button');
+  assert.equal(buttons.length, 2);
+  for (const btn of buttons) await click(btn);
+  assert.deepEqual(b.copies, ['ansgo-admin panel-pass', 'docker exec -it ansgo ansgo-admin panel-pass']);
+  assert.deepEqual(b.requests.map(r => r.key), ['auth']);
+  assert.ok(!('deploy_mode' in b.fixture.data.auth));
+});
+await test('登录后按 Docker/裸金属渲染 SSH 恢复命令，复制、停止确认与提示保持一致', async () => {
+  for (const docker of [false, true]) {
+    const b = await boot({ docker }); await b.tab('mgmt');
+    const root = b.document.querySelector('[data-fold="mgmt.panel"]'), command = (docker ? 'docker exec ansgo ' : '') + 'ansgo-admin restart panel';
+    assert.ok(b.requests.some(r => r.key === 'system/info'));
+    assert.equal(root.querySelector('code').textContent, command);
+    assert.equal(b.ctx.adminCmd('panel-pass'), (docker ? 'docker exec -it ansgo ' : '') + 'ansgo-admin panel-pass');
+    assert.equal(b.ctx.adminCmd('restart all'), (docker ? 'docker exec ansgo ' : '') + 'ansgo-admin restart all');
+    assert.equal(b.ctx.adminCmd('prune', true), (docker ? 'docker exec -it ansgo ' : '') + 'ansgo-admin prune');
+    if (docker) assert.match(root.textContent, /宿主机 SSH.*若改过容器名/);
+    else assert.ok(!root.textContent.includes('docker exec'));
+    await click(findButton(root, '复制命令')); assert.equal(b.copies.at(-1), command);
+    let confirmation;
+    b.ctx.confirm = text => { confirmation = text; return false; };
+    await click(findButton(root, '停止面板')); assert.ok(confirmation.includes(command)); assert.equal(b.posts.length, 0);
+    b.ctx.confirm = () => true;
+    await click(findButton(root, '停止面板'));
+    assert.ok(b.document.querySelector('#toast').textContent.includes(command));
+    assert.deepEqual(b.posts.at(-1).body, { target: 'panel', action: 'stop' });
+  }
+});
+await test('部署形态加载失败时不显示错误的裸金属兜底命令', async () => {
+  const b = await boot({ docker: true });
+  b.ctx.intercept = key => key === 'system/info' ? { status: 500, body: { error: '部署信息暂不可用' } } : null;
+  await b.tab('mgmt');
+  assert.equal(b.document.querySelector('[data-fold="mgmt.panel"]'), null);
+  assert.match(b.document.querySelector('#content').textContent, /部署信息暂不可用/);
+});
+
 await test('落地 SS↔SOCKS 切换保留双份值，显式关闭远端仍提交 false', async () => {
   const b = await boot(); await b.tab('landing'); const e = b.get('state.landings.get("1")');
   input(e.inputs.ss_host, 'your-domain.com'); input(e.inputs.ss_password, 'SS-draft');

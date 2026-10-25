@@ -235,7 +235,9 @@ def run(name, *, available=1500*M, post=800*M, extras=(), local_target=False,
                  available=available, post_available=post, events=[], config=cfg,stage=str(stage))
     if fail: state[fail] = True
     (root/'state.json').write_text(json.dumps(state))
-    code = functions.replace("'/proc/meminfo'",repr(str(mem))).replace('/etc/ansgo-backup',str(root/'backups'))
+    code = functions.replace("'/proc/meminfo'",repr(str(mem)))
+    code = code.replace('mkdir -p /etc/ansgo-backup', 'mkdir -p '+str(root/'backups'))
+    code = code.replace('BACKUP="/etc/ansgo-backup/', 'BACKUP="'+str(root/'backups')+'/')
     if real_config:
         code = code.replace('docker_prepare_compose(){', 'docker_prepare_compose(){\n  local -a COMPOSE=("$REAL_DOCKER" compose)')
     setup = r'''
@@ -270,7 +272,14 @@ dl(){ printf '# fixture\n' > "$2"; }
             if token in template and token not in text: continue
             assert token in updated, (name,token,updated)
         assert updated.split('  ansgo:',1)[0] == text.split('  ansgo:',1)[0]
-        assert updated.split('  after:',1)[1] == text.split('  after:',1)[1]
+        before_tail, after_tail = text.split('  after:',1)[1], updated.split('  after:',1)[1]
+        if '  ansgo_backup:\n' not in before_tail:
+            after_tail = after_tail.replace('  ansgo_backup:\n', '', 1)
+        if '\nvolumes:' not in before_tail:
+            after_tail = after_tail.replace('volumes:\n', '', 1)
+        # 空映射改成分行时，行尾注释仍须原样保留。
+        before_tail = before_tail.replace('volumes: {}', 'volumes: ')
+        assert after_tail == before_tail, (name, before_tail, after_tail)
         assert compose.stat().st_mode & 0o777 == mode
         for secret in ('fixture-panel-unique','fixture-dynu-unique'):
             assert secret not in updated and secret not in result.stdout+result.stderr
@@ -285,6 +294,11 @@ dl(){ printf '# fixture\n' > "$2"; }
             assert int(actual['memswap_limit']) == expected_mem+256*M
             assert actual['environment']['EXAMPLE'] == 'a$$b'
             assert actual['environment']['PANEL_PASS'] == 'fixture-panel-unique'
+            mounts = [v for v in actual['volumes'] if v['target'].rstrip('/') == '/etc/ansgo-backup']
+            assert len(mounts) == 1, (name, mounts)
+            if not any(v.get('target', '').rstrip('/') == '/etc/ansgo-backup' for v in cfg.get('volumes', [])):
+                assert mounts[0]['type'] == 'volume' and mounts[0]['source'] == 'ansgo_backup'
+            assert 'Docker 日常备份现已持久化到卷 ansgo_backup' in result.stdout
     removed = [e.split()[-1] for e in state['events'] if e.startswith('image rm ')]
     assert ids['foreign'] not in removed and ids['shared'] not in removed
     assert not any('prune' in e for e in state['events'] if not e.startswith('exec '))
@@ -299,6 +313,7 @@ cfg = json.loads(json.dumps(base_config))
 cfg.update(memswap_limit=576*M,pids_limit=512,cpu_shares=512,cpus=1.0)
 cfg['logging']['options'] = {'max-size':'10m','max-file':'3'}
 cfg['volumes'].append(dict(target='/host/manual-certs'))
+cfg['volumes'].append(dict(target='/etc/ansgo-backup'))
 run('idempotent',text=updated,config=cfg,real_config=bool(real_compose))
 assert (tmp/'idempotent/project/docker-compose.yml').read_text() == updated
 cfg = json.loads(json.dumps(base_config)); del cfg['mem_limit']
@@ -314,6 +329,37 @@ cfg = json.loads(json.dumps(base_config)); cfg['volumes'].append(dict(target='/h
 text = template.replace('      - fixture_etc:', '      - type: bind\n        source: /etc/ansgo-docker/manual-certs\n        target: /host/manual-certs\n        read_only: true\n      - fixture_etc:')
 run('existing-mount',text=text,config=cfg,real_config=bool(real_compose))
 assert (tmp/'existing-mount/project/docker-compose.yml').read_text().count('/host/manual-certs') == 1
+for name, text in [
+    ('backup-bc-lax', template),
+    ('backup-no-top-volumes', template.replace('fixture_etc:/etc/ansgo', '/etc/ansgo:/etc/ansgo')
+                                    .replace('volumes:\n  fixture_etc:\n', '')),
+    ('backup-empty-top-volumes', template.replace('fixture_etc:/etc/ansgo', '/etc/ansgo:/etc/ansgo')
+                                       .replace('volumes:\n  fixture_etc:\n', 'volumes: {} # 卷注释\n')),
+    ('backup-existing-declaration', template+'  ansgo_backup: # 自定义卷\n    name: fixture_backup\n'),
+]:
+    state, result, _ = run(name, text=text, mode=0o640, real_config=bool(real_compose))
+    updated = (tmp/name/'project/docker-compose.yml').read_text()
+    assert updated.count('ansgo_backup:/etc/ansgo-backup') == 1
+    assert updated.count('  ansgo_backup:') == 1
+    cfg = json.loads(json.dumps(base_config))
+    cfg.update(memswap_limit=576*M,pids_limit=512,cpu_shares=512,cpus=1.0)
+    cfg['logging']['options'] = {'max-size':'10m','max-file':'3'}
+    cfg['volumes'].extend([dict(target='/host/manual-certs'), dict(target='/etc/ansgo-backup')])
+    run(name+'-again',text=updated,config=cfg,mode=0o640,real_config=bool(real_compose))
+    assert (tmp/(name+'-again')/'project/docker-compose.yml').read_text() == updated
+for name, mount, declaration in [
+    ('short', '      - daily_backups:/etc/ansgo-backup\n', '  daily_backups:\n'),
+    ('long', '      - type: bind\n        source: /srv/ansgo-backup\n        target: /etc/ansgo-backup/\n', ''),
+]:
+    text = template.replace('      - fixture_etc:', mount+'      - fixture_etc:')+declaration
+    cfg = json.loads(json.dumps(base_config)); cfg['volumes'].append(dict(target='/etc/ansgo-backup/'))
+    run('backup-existing-'+name,text=text,config=cfg,real_config=bool(real_compose))
+    updated = (tmp/('backup-existing-'+name)/'project/docker-compose.yml').read_text()
+    assert mount in updated and 'ansgo_backup:' not in updated
+cfg = json.loads(json.dumps(base_config)); cfg['volumes'] = []
+text = re.sub(r'    volumes:.*?(?=  after:)', '', template, flags=re.S)
+run('backup-no-service-volumes',text=text,config=cfg,real_config=bool(real_compose))
+print('PASS Docker backup volume: BC-LAX 注释/env_file/gai/320m/0640 保留；缺顶层/空映射/已有声明/重复升级幂等，已有自定义短长挂载不覆盖')
 for driver in ('journald','json-file'):
     cfg = json.loads(json.dumps(base_config))
     cfg['logging'] = dict(driver=driver,options={'max-size':'20m'} if driver=='json-file' else {})

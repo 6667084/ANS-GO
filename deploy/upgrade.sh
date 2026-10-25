@@ -386,6 +386,7 @@ PY
   ansgo-admin prune --yes || say '服务升级已完成；备份清理失败，请稍后执行 ansgo-admin prune --yes'
 }
 # Docker 只操作 inspect 查到的真实挂载；不创建猜测名称的空卷。
+# 日常备份卷原位保留，不重复打包历史归档，避免低磁盘主机双份占用。
 docker_backup(){
   local dest type name source helper_image
   mkdir -p "$STAGE/docker/files"
@@ -538,7 +539,11 @@ else:
             if name not in cfg.get('logging', {}).get('options', {}):
                 log.insert(oi+1, op+name+': "'+value+'"\n')
     block[i+1:j] = log
-if not any(v.get('target') == '/host/manual-certs' for v in cfg.get('volumes', [])):
+missing_mounts = [mount for target, mount in (
+    ('/host/manual-certs', '/etc/ansgo-docker/manual-certs:/host/manual-certs:ro'),
+    ('/etc/ansgo-backup', 'ansgo_backup:/etc/ansgo-backup'))
+    if not any(v.get('target', '').rstrip('/') == target for v in cfg.get('volumes', []))]
+if missing_mounts:
     volumes = section(block, 'volumes', depth)
     if volumes:
         i, j, m = volumes
@@ -547,10 +552,25 @@ if not any(v.get('target') == '/host/manual-certs' for v in cfg.get('volumes', [
         if value == '[]': replace_value(block, i, '')
         vp = next((line[:line.index('-')] for line in block[i+1:j]
                    if line.lstrip().startswith('- ')), pad+'  ')
-        block.insert(i+1, vp+'- /etc/ansgo-docker/manual-certs:/host/manual-certs:ro\n')
+        block[i+1:i+1] = [vp+'- '+mount+'\n' for mount in missing_mounts]
     else:
-        add.extend([pad+'volumes:\n', pad+'  - /etc/ansgo-docker/manual-certs:/host/manual-certs:ro\n'])
-text = ''.join(lines[:start]+add+block+lines[stop:])
+        add.extend([pad+'volumes:\n']+[pad+'  - '+mount+'\n' for mount in missing_mounts])
+edited = lines[:start]+add+block+lines[stop:]
+if 'ansgo_backup:/etc/ansgo-backup' in missing_mounts:
+    volumes = section(edited, 'volumes', 0)
+    if volumes:
+        i, j, m = volumes
+        value = m[3].split('#', 1)[0].strip()
+        assert value in ('', '{}'), '请将顶层 volumes 改为分行格式后升级'
+        if value == '{}': replace_value(edited, i, '')
+        fields = [len(m[1]) for line in edited[i+1:j] if (m := key(line))]
+        vd = min(fields, default=2)
+        if not section(edited[i+1:j], 'ansgo_backup', vd):
+            edited.insert(i+1, ' '*vd+'ansgo_backup:\n')
+    else:
+        if edited and not edited[-1].endswith('\n'): edited[-1] += '\n'
+        edited.extend(['volumes:\n', '  ansgo_backup:\n'])
+text = ''.join(edited)
 assert section(block, 'env_file', depth), 'env_file 不得丢失'
 # 外部凭据引用与显式环境块必须逐行保留。
 for name in ('env_file', 'environment'):
@@ -706,6 +726,7 @@ upgrade_docker(){
     path=$(python3 -c '\''import json;c=json.load(open("/etc/ansgo/panel.json"));print(c["url_path"])'\'')
     curl --noproxy "*" -kfsS --max-time 5 "https://127.0.0.1:$port${path}api/auth" >/dev/null'
   MUTATED=0
+  say 'Docker 日常备份现已持久化到卷 ansgo_backup（已有自定义备份挂载继续沿用）'
   docker exec "$CID" ansgo-admin prune --yes || say '容器升级已完成；容器内备份清理失败'
   # 宿主的 Docker 备份也需保留策略；使用本次同版本 admin，不安装到宿主。
   ANSGO_CONF="$STAGE/docker/files/etc/ansgo/panel.json" ANSGO_LIB="$STAGE/ansgo-limits" \

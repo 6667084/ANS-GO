@@ -219,7 +219,7 @@ PYCERT
 if grep -q '"admin_pass_hash": "PLACEHOLDER"' "$CONF" 2>/dev/null && [ -n "${PANEL_PASS:-}" ]; then
   log "设置管理员密码（来自 PANEL_PASS 环境变量，已写入 bcrypt）"
   /usr/local/bin/ansgo-panel -setpass "${PANEL_PASS}" \
-    || log "WARN: setpass 失败，稍后可用 docker exec ansgo ansgo-admin panel-pass 重置"
+    || log "WARN: setpass 失败，稍后在宿主机执行 docker exec -it ansgo ansgo-admin panel-pass 重置（若改过容器名请替换 ansgo）"
 fi
 
 # ---- 3/3 证书：manual 模式同步宿主证书到 /etc/ssl/ansgo/ 卷；acme 模式无则自签占位 ----
@@ -414,5 +414,6 @@ ln -sf /lib/systemd/system/cron.service /etc/systemd/system/multi-user.target.wa
 # 容器内 PATH（含 acme.sh，供面板 exec ansgo-admin/genconf 使用）
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.acme.sh
 
+log "找回面板密码：在宿主机执行 docker exec -it ansgo ansgo-admin panel-pass（若改过容器名请替换 ansgo）"
 log "启动 systemd（PID 1）—— 拉起 caddy(:443 伪装) + ansgo-panel"
 exec /sbin/init

@@ -34,6 +34,13 @@ ok(){ printf '%s[OK]%s %s\n' "$C_G" "$C_0" "$*"; }
 warn(){ printf '%s[!]%s %s\n' "$C_Y" "$C_0" "$*" >&2; }
 err(){ printf '%s[X]%s %s\n' "$C_R" "$C_0" "$*" >&2; }
 hr(){ printf '%s---- %s ----%s\n' "$C_B" "$*" "$C_0"; }
+admin_cmd_hint(){
+  local prefix=""
+  if [ "${ANSGO_DOCKER:-}" = 1 ] || [ -f "$ROOT/.dockerenv" ]; then
+    prefix="docker exec -it ansgo "
+  fi
+  printf '%sansgo-admin %s' "$prefix" "$1"
+}
 
 # ---------- 配置读写 ----------
 _conf(){ python3 -c "import json; d=json.load(open('$CONF')); print(d.get('$1',''))" 2>/dev/null; }
@@ -293,11 +300,11 @@ cmd_restart(){
     *) err "未知目标: $t (可用: ss anytls socks naive panel all)"; return 1;;
   esac
 }
-cmd_stop(){ local t="${1:-}"; [ -z "$t" ] && { err "用法: ansgo-admin stop [ss|anytls|socks|naive|panel]"; return 1; }; stop_svc "$(svc_of "$t")"; }
+cmd_stop(){ local t="${1:-}"; [ -z "$t" ] && { err "用法: $(admin_cmd_hint "stop [ss|anytls|socks|naive|panel]")"; return 1; }; stop_svc "$(svc_of "$t")"; }
 cmd_logs(){ local t="${1:-all}"; case "$t" in ss|anytls|socks|sing-box) journalctl -u sing-box -n 50 --no-pager;; naive|caddy) journalctl -u caddy -n 50 --no-pager;; panel|ansgo-panel) journalctl -u ansgo-panel -n 50 --no-pager;; all) journalctl -u caddy -u sing-box -u ansgo-panel -n 30 --no-pager;; *) err "未知目标: $t";; esac; }
 
 cmd_regen(){
-  local t="${1:-}"; [ -z "$t" ] && { err "用法: ansgo-admin regen [ss|anytls|socks|naive]"; return 1; }
+  local t="${1:-}"; [ -z "$t" ] && { err "用法: $(admin_cmd_hint "regen [ss|anytls|socks|naive]")"; return 1; }
   do_backup >/dev/null || return 1
   case "$t" in
     ss)
@@ -331,7 +338,7 @@ cmd_regen2(){
 #   Go 端 api/landings/regen 调用本命令后自行 genconf+restart+verify。
 cmd_regen_landing(){
   local id="${1:-}"
-  [ -n "$id" ] || { err "用法: ansgo-admin regen-landing <id>"; return 1; }
+  [ -n "$id" ] || { err "用法: $(admin_cmd_hint "regen-landing <id>")"; return 1; }
   do_backup >/dev/null || return 1
   local p u
   p="$(gen_anytls_pass)"; u="$(cat /proc/sys/kernel/random/uuid)"
@@ -424,9 +431,9 @@ cmd_firewall(){
   local act="${1:-list}"
   case "$act" in
     list) nft list ruleset 2>/dev/null | sed 's/^/  /' || warn "nft 无规则或未安装（policy=accept 全放行）";;
-    open) [ -z "${2:-}" ] && { err "用法: ansgo-admin firewall open PORT"; return 1; }; nft add rule inet filter input tcp dport "$2" accept 2>/dev/null || warn "无 inet filter 表，跳过（policy=accept 已放行）"; ok "放行 $2";;
-    close) [ -z "${2:-}" ] && { err "用法: ansgo-admin firewall close PORT"; return 1; }; warn "按 AGENTS 约定不添加 drop 规则以免锁死 SSH；如确需关闭端口请改服务端口或停服务。";;
-    *) err "用法: ansgo-admin firewall [list|open PORT|close PORT]";;
+    open) [ -z "${2:-}" ] && { err "用法: $(admin_cmd_hint "firewall open PORT")"; return 1; }; nft add rule inet filter input tcp dport "$2" accept 2>/dev/null || warn "无 inet filter 表，跳过（policy=accept 已放行）"; ok "放行 $2";;
+    close) [ -z "${2:-}" ] && { err "用法: $(admin_cmd_hint "firewall close PORT")"; return 1; }; warn "按 AGENTS 约定不添加 drop 规则以免锁死 SSH；如确需关闭端口请改服务端口或停服务。";;
+    *) err "用法: $(admin_cmd_hint "firewall [list|open PORT|close PORT]")";;
   esac
 }
 
@@ -436,7 +443,7 @@ cmd_update(){
     sing-box|caddy) /usr/local/bin/ansgo-upgrade --yes --metal;;
     panel)
       local src="${2:-}"
-      [ -s "$src" ] || { err "用法: ansgo-admin update panel <新二进制路径>"; return 1; }
+      [ -s "$src" ] || { err "用法: $(admin_cmd_hint "update panel <新二进制路径>")"; return 1; }
       do_backup >/dev/null || return 1
       (
         set -e
@@ -460,7 +467,7 @@ PYELF
           exit 1
         fi
       );;
-    *) err "用法: ansgo-admin update [sing-box|caddy|panel <路径>]"; return 1;;
+    *) err "用法: $(admin_cmd_hint "update [sing-box|caddy|panel <路径>]")"; return 1;;
   esac
 }
 
@@ -548,6 +555,10 @@ cmd_uninstall(){
 }
 
 usage(){
+  echo "用法: $(admin_cmd_hint '<子命令>')"
+  if [ "${ANSGO_DOCKER:-}" = 1 ] || [ -f "$ROOT/.dockerenv" ]; then
+    echo "Docker 命令在宿主机执行；若改过容器名，请替换 ansgo。"
+  fi
   cat <<'EOF'
 ansgo-admin —— ANS-GO 离线管理
   status                      多协议+面板状态 / 端口 / 资源 / 证书
@@ -585,7 +596,7 @@ case "$cmd" in
   regen2) cmd_regen2;;
   regen-landing) cmd_regen_landing "${1:-}";;
   group2) cmd_group2 "${1:-}";;
-  cert) case "${1:-status}" in status) cmd_cert_status;; renew) cmd_cert_renew;; issue) cmd_cert_issue;; *) err "用法: ansgo-admin cert [status|renew|issue]";; esac;;
+  cert) case "${1:-status}" in status) cmd_cert_status;; renew) cmd_cert_renew;; issue) cmd_cert_issue;; *) err "用法: $(admin_cmd_hint "cert [status|renew|issue]")";; esac;;
   panel-pass) cmd_panel_pass;;
   panel-path) cmd_panel_path;;
   panel-port) cmd_panel_port "${1:-}";;
